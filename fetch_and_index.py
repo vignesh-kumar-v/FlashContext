@@ -35,10 +35,11 @@ from qdrant_client.models import Distance, VectorParams, PointStruct
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # --- Configuration ---
-OLLAMA_BASE = "http://localhost:11434"
+OLLAMA_BASE = os.getenv("OLLAMA_BASE", "http://localhost:11434")
 KEYWORD_MODEL = "glm-5.2:cloud"
 EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 PDF_DIR = Path(__file__).parent / "downloaded_papers"
+QDRANT_URL = os.getenv("QDRANT_URL", "")
 QDRANT_PATH = Path(__file__).parent / "qdrant_storage"
 COLLECTION_PREFIX = "papers"
 TOTAL_PAPERS = 25
@@ -410,8 +411,14 @@ def get_embedding(text: str, max_retries: int = 5) -> list[float]:
 # Step 6: Qdrant Storage
 # =============================================================================
 
-def init_qdrant(session_id: str) -> QdrantClient:
-    client = QdrantClient(path=str(QDRANT_PATH))
+def _get_qdrant_client() -> QdrantClient:
+    if QDRANT_URL:
+        return QdrantClient(url=QDRANT_URL)
+    return QdrantClient(path=str(QDRANT_PATH))
+
+
+def init_qdrant(session_id: str) -> tuple[QdrantClient, str]:
+    client = _get_qdrant_client()
     collection_name = f"{COLLECTION_PREFIX}_{session_id}"
 
     test_emb = get_embedding("dimension test")
@@ -431,7 +438,7 @@ def init_qdrant(session_id: str) -> QdrantClient:
 
 def clear_session(session_id: str):
     """Delete the Qdrant collection for a session."""
-    client = QdrantClient(path=str(QDRANT_PATH))
+    client = _get_qdrant_client()
     collection_name = f"{COLLECTION_PREFIX}_{session_id}"
     try:
         client.delete_collection(collection_name)
