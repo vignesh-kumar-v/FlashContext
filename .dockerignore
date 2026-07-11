@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+dist/
+.env
+downloaded_papers/
+downloaded_pdfs/
+processed_texts/
+qdrant_storage/
+document_index/
+.DS_Store
+*.log
