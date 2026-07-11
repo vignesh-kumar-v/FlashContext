@@ -4,10 +4,11 @@ RAG Query Script: Retrieve chunks from Qdrant and generate answers via glm-5.2:c
 
 Workflow:
 1. Take user query
-2. Embed query via Hugging Face Inference API
-3. Search Qdrant for top-k relevant chunks
-4. Build prompt with retrieved context
-5. Generate response via glm-5.2:cloud (Ollama)
+2. Check if Qdrant has relevant chunks; if not, run fetch_and_index pipeline
+3. Embed query via Hugging Face Inference API
+4. Search Qdrant for top-k relevant chunks
+5. Build prompt with retrieved context
+6. Generate response via glm-5.2:cloud (Ollama)
 """
 
 import os
@@ -17,7 +18,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 from huggingface_hub import InferenceClient
 from qdrant_client import QdrantClient
-from qdrant_client.models import QueryRequest
 import requests
 
 load_dotenv()
@@ -27,7 +27,7 @@ OLLAMA_BASE = "http://localhost:11434"
 LLM_MODEL = "glm-5.2:cloud"
 EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 QDRANT_PATH = Path(__file__).parent / "qdrant_storage"
-COLLECTION_NAME = "papers"
+COLLECTION_PREFIX = "papers"
 TOP_K = 5
 # --- End Configuration ---
 
@@ -63,11 +63,12 @@ def embed_query(text: str) -> list[float]:
     raise ValueError(f"Unexpected embedding format: {type(result)}")
 
 
-def search_qdrant(query: str, top_k: int = TOP_K) -> list[dict]:
+def search_qdrant(query: str, session_id: str = "default", top_k: int = TOP_K) -> list[dict]:
     client = QdrantClient(path=str(QDRANT_PATH))
+    collection_name = f"{COLLECTION_PREFIX}_{session_id}"
     emb = embed_query(query)
     results = client.query_points(
-        COLLECTION_NAME, query=emb, limit=top_k, with_payload=True
+        collection_name, query=emb, limit=top_k, with_payload=True
     )
     chunks = []
     for r in results.points:
@@ -110,6 +111,16 @@ def generate_response(prompt: str) -> str:
     return resp.json()["response"].strip()
 
 
+def _qdrant_has_data(session_id: str = "default") -> bool:
+    try:
+        client = QdrantClient(path=str(QDRANT_PATH))
+        collection_name = f"{COLLECTION_PREFIX}_{session_id}"
+        info = client.get_collection(collection_name)
+        return info.points_count > 0
+    except Exception:
+        return False
+
+
 def main():
     if len(sys.argv) > 1:
         query = " ".join(sys.argv[1:])
@@ -121,6 +132,13 @@ def main():
         sys.exit(1)
 
     log.info(f"Query: {query}")
+
+    if not _qdrant_has_data():
+        log.info("First query — populating DB with relevant papers (this will take a moment)...")
+        from fetch_and_index import run_pipeline
+        run_pipeline(query)
+    else:
+        log.info("DB already populated — searching directly...")
 
     log.info("Searching Qdrant for relevant chunks...")
     chunks = search_qdrant(query)
