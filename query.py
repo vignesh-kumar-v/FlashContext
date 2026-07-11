@@ -23,9 +23,10 @@ import requests
 load_dotenv()
 
 # --- Configuration ---
-OLLAMA_BASE = "http://localhost:11434"
+OLLAMA_BASE = os.getenv("OLLAMA_BASE", "http://localhost:11434")
 LLM_MODEL = "glm-5.2:cloud"
 EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+QDRANT_URL = os.getenv("QDRANT_URL", "")
 QDRANT_PATH = Path(__file__).parent / "qdrant_storage"
 COLLECTION_PREFIX = "papers"
 TOP_K = 5
@@ -63,8 +64,14 @@ def embed_query(text: str) -> list[float]:
     raise ValueError(f"Unexpected embedding format: {type(result)}")
 
 
+def _get_qdrant_client() -> QdrantClient:
+    if QDRANT_URL:
+        return QdrantClient(url=QDRANT_URL)
+    return QdrantClient(path=str(QDRANT_PATH))
+
+
 def search_qdrant(query: str, session_id: str = "default", top_k: int = TOP_K) -> list[dict]:
-    client = QdrantClient(path=str(QDRANT_PATH))
+    client = _get_qdrant_client()
     collection_name = f"{COLLECTION_PREFIX}_{session_id}"
     emb = embed_query(query)
     results = client.query_points(
@@ -113,7 +120,7 @@ def generate_response(prompt: str) -> str:
 
 def _qdrant_has_data(session_id: str = "default") -> bool:
     try:
-        client = QdrantClient(path=str(QDRANT_PATH))
+        client = _get_qdrant_client()
         collection_name = f"{COLLECTION_PREFIX}_{session_id}"
         info = client.get_collection(collection_name)
         return info.points_count > 0
