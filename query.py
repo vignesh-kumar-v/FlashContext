@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""
+RAG Query Script: Retrieve chunks from Qdrant and generate answers via glm-5.2:cloud.
+
+Workflow:
+1. Take user query
+2. Embed query via Hugging Face Inference API
+3. Search Qdrant for top-k relevant chunks
+4. Build prompt with retrieved context
+5. Generate response via glm-5.2:cloud (Ollama)
+"""
+
+import os
+import sys
+import logging
+from pathlib import Path
+from dotenv import load_dotenv
+from huggingface_hub import InferenceClient
+from qdrant_client import QdrantClient
+from qdrant_client.models import QueryRequest
+import requests
+
+load_dotenv()
+
+# --- Configuration ---
+OLLAMA_BASE = "http://localhost:11434"
+LLM_MODEL = "glm-5.2:cloud"
+EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+QDRANT_PATH = Path(__file__).parent / "qdrant_storage"
+COLLECTION_NAME = "papers"
+TOP_K = 5
+# --- End Configuration ---
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger(__name__)
+
+_hf_client = None
+
+
+def _get_hf_client() -> InferenceClient:
+    global _hf_client
+    if _hf_client is None:
+        token = os.getenv("HF_TOKEN")
+        if not token:
+            raise ValueError("HF_TOKEN not found in .env file")
+        _hf_client = InferenceClient(token=token)
+    return _hf_client
+
+
+def embed_query(text: str) -> list[float]:
+    client = _get_hf_client()
+    result = client.feature_extraction(text, model=EMBED_MODEL)
+    if hasattr(result, "tolist"):
+        result = result.tolist()
+    if isinstance(result, list) and len(result) > 0 and isinstance(result[0], list):
+        return result[0]
+    if isinstance(result, list) and isinstance(result[0], (int, float)):
+        return result
+    raise ValueError(f"Unexpected embedding format: {type(result)}")
+
+
+def search_qdrant(query: str, top_k: int = TOP_K) -> list[dict]:
+    client = QdrantClient(path=str(QDRANT_PATH))
+    emb = embed_query(query)
+    results = client.query_points(
+        COLLECTION_NAME, query=emb, limit=top_k, with_payload=True
+    )
+    chunks = []
+    for r in results.points:
+        chunks.append({
+            "score": r.score,
+            "title": r.payload.get("title", "Unknown"),
+            "section": r.payload.get("source_section", "Unknown"),
+            "text": r.payload.get("text", ""),
+        })
+    return chunks
+
+
+def build_prompt(query: str, chunks: list[dict]) -> str:
+    context_parts = []
+    for i, c in enumerate(chunks):
+        context_parts.append(
+            f"[Source {i+1}] Title: {c['title']}\n"
+            f"Section: {c['section']}\n"
+            f"Content: {c['text']}"
+        )
+    context = "\n\n".join(context_parts)
+
+    return (
+        "You are a helpful research assistant. Answer the user's question using ONLY "
+        "the provided context below. If the context does not contain enough information "
+        "to answer the question, say so honestly. Do not make up information.\n\n"
+        f"Context:\n{context}\n\n"
+        f"Question: {query}\n\n"
+        "Answer:"
+    )
+
+
+def generate_response(prompt: str) -> str:
+    resp = requests.post(
+        f"{OLLAMA_BASE}/api/generate",
+        json={"model": LLM_MODEL, "prompt": prompt, "stream": False},
+        timeout=120,
+    )
+    resp.raise_for_status()
+    return resp.json()["response"].strip()
+
+
+def main():
+    if len(sys.argv) > 1:
+        query = " ".join(sys.argv[1:])
+    else:
+        query = input("Enter your query: ").strip()
+
+    if not query:
+        print("No query provided.")
+        sys.exit(1)
+
+    log.info(f"Query: {query}")
+
+    log.info("Searching Qdrant for relevant chunks...")
+    chunks = search_qdrant(query)
+    if not chunks:
+        print("No relevant chunks found in the database.")
+        sys.exit(1)
+
+    log.info(f"Found {len(chunks)} relevant chunks:")
+    for i, c in enumerate(chunks):
+        log.info(f"  [{i+1}] {c['title'][:60]} (score: {c['score']:.4f})")
+
+    log.info("Building prompt and generating response...")
+    prompt = build_prompt(query, chunks)
+    response = generate_response(prompt)
+
+    print("\n" + "=" * 60)
+    print("ANSWER")
+    print("=" * 60)
+    print(response)
+    print("=" * 60)
+
+    print("\nSources:")
+    for i, c in enumerate(chunks):
+        print(f"  [{i+1}] {c['title']} (score: {c['score']:.4f})")
+
+
+if __name__ == "__main__":
+    main()
