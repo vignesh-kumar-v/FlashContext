@@ -6,3 +6,7 @@ tqdm>=4.66.0
 numpy>=1.26.0
 python-dotenv>=1.0.0
 huggingface-hub>=0.26.0
+fastapi>=0.115.0
+uvicorn>=0.32.0
+celery>=5.4.0
+redis>=5.2.0
