@@ -3,10 +3,10 @@
 Semantic Scholar Paper Fetcher with Layout-Aware Chunking and Qdrant Storage
 
 Workflow:
-1. Extract keywords from query using qwen3.5:9b-mlx via Ollama
+1. Extract keywords from query using glm-5.2:cloud via Ollama
 2. Search Semantic Scholar API with keywords
-3. Fetch papers: 80% top-cited, 20% most recent
-4. Download PDFs to local folder
+3. Fetch papers: 80% top-cited, 20% most recent (ArXiv-only)
+4. Download PDFs from ArXiv
 5. Chunk PDFs using layout-aware chunking (headings-based)
    Fallback: recursive character chunking
 6. Store chunks in Qdrant vector DB with metadata
@@ -24,6 +24,10 @@ import requests
 from pathlib import Path
 from typing import Optional
 from collections import Counter
+from dotenv import load_dotenv
+from huggingface_hub import InferenceClient
+
+load_dotenv()
 
 import fitz  # pymupdf
 from qdrant_client import QdrantClient
@@ -31,13 +35,12 @@ from qdrant_client.models import Distance, VectorParams, PointStruct
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # --- Configuration ---
-QUERY = "I want to build a GPT style transformer using Muon Optimizer"
 OLLAMA_BASE = "http://localhost:11434"
-KEYWORD_MODEL = "qwen3.5:9b-mlx"
-EMBED_MODEL = "qwen3-embedding:0.6b"
+KEYWORD_MODEL = "glm-5.2:cloud"
+EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 PDF_DIR = Path(__file__).parent / "downloaded_papers"
 QDRANT_PATH = Path(__file__).parent / "qdrant_storage"
-COLLECTION_NAME = "papers"
+COLLECTION_PREFIX = "papers"
 TOTAL_PAPERS = 25
 TOP_CITED_RATIO = 0.8
 RECENT_RATIO = 0.2
@@ -72,7 +75,7 @@ def extract_keywords(query: str) -> str:
             resp = requests.post(
                 f"{OLLAMA_BASE}/api/generate",
                 json={"model": KEYWORD_MODEL, "prompt": prompt, "stream": False},
-                timeout=300,
+                timeout=120,
             )
             resp.raise_for_status()
             keywords = resp.json()["response"].strip()
@@ -132,21 +135,26 @@ def fetch_papers(keywords: str) -> list[dict]:
     recent_n = math.ceil(TOTAL_PAPERS * RECENT_RATIO)
 
     log.info(f"Fetching {top_n} top-cited papers...")
-    cited = _s2_search(keywords, sort="citationCount:desc", limit=top_n)
+    cited = _s2_search(keywords, sort="citationCount:desc", limit=top_n * 3)
 
     log.info(f"Fetching {recent_n} recent papers...")
-    recent = _s2_search(keywords, sort="publicationDate:desc", limit=recent_n)
+    recent = _s2_search(keywords, sort="publicationDate:desc", limit=recent_n * 3)
 
     seen = set()
     merged = []
     for p in cited + recent:
         pid = p.get("paperId")
-        if pid and pid not in seen:
+        arxiv_id = p.get("externalIds", {}).get("ArXiv")
+        if pid and pid not in seen and arxiv_id:
             seen.add(pid)
             merged.append(p)
 
-    log.info(f"Total unique papers: {len(merged)}")
-    return merged
+    cited_arxiv = [p for p in merged if p in cited][:top_n]
+    recent_arxiv = [p for p in merged if p in recent][:recent_n]
+    final = cited_arxiv + recent_arxiv
+
+    log.info(f"ArXiv papers: {len(final)} (top-cited: {len(cited_arxiv)}, recent: {len(recent_arxiv)})")
+    return final
 
 
 # =============================================================================
@@ -164,35 +172,27 @@ def download_pdf(paper: dict) -> Optional[Path]:
         log.info(f"  Already downloaded: {filepath.name}")
         return filepath
 
-    oa = paper.get("openAccessPdf")
-    if oa and oa.get("url"):
-        url = oa["url"]
-        log.info(f"  Downloading OA PDF: {url}")
-        try:
-            r = requests.get(url, timeout=60, stream=True)
-            r.raise_for_status()
-            filepath.write_bytes(r.content)
-            log.info(f"  Saved: {filepath.name}")
-            return filepath
-        except Exception as e:
-            log.warning(f"  OA PDF failed: {e}")
-
     ext_ids = paper.get("externalIds") or {}
     arxiv_id = ext_ids.get("ArXiv")
-    if arxiv_id:
-        url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-        log.info(f"  Downloading ArXiv PDF: {url}")
-        try:
-            r = requests.get(url, timeout=60, stream=True)
-            r.raise_for_status()
-            filepath.write_bytes(r.content)
-            log.info(f"  Saved: {filepath.name}")
-            return filepath
-        except Exception as e:
-            log.warning(f"  ArXiv PDF failed: {e}")
+    if not arxiv_id:
+        log.warning(f"  No ArXiv ID for: {title[:80]}")
+        return None
 
-    log.warning(f"  No PDF available for: {title[:80]}")
-    return None
+    url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+    log.info(f"  Downloading ArXiv PDF: {url}")
+    try:
+        r = requests.get(url, timeout=60, stream=True)
+        r.raise_for_status()
+        content = r.content
+        if len(content) < 1000:
+            log.warning(f"  ArXiv PDF too small ({len(content)} bytes), skipping")
+            return None
+        filepath.write_bytes(content)
+        log.info(f"  Saved: {filepath.name}")
+        return filepath
+    except Exception as e:
+        log.warning(f"  ArXiv PDF failed: {e}")
+        return None
 
 
 # =============================================================================
@@ -367,21 +367,36 @@ def chunk_pdf(pdf_path: Path) -> list[dict]:
 
 
 # =============================================================================
-# Step 5: Embeddings via Ollama
+# Step 5: Embeddings via Hugging Face Inference API
 # =============================================================================
+
+_hf_client = None
+
+
+def _get_hf_client() -> InferenceClient:
+    global _hf_client
+    if _hf_client is None:
+        token = os.getenv("HF_TOKEN")
+        if not token:
+            raise ValueError("HF_TOKEN not found in .env file")
+        _hf_client = InferenceClient(token=token)
+    return _hf_client
+
 
 def get_embedding(text: str, max_retries: int = 5) -> list[float]:
     text = text[:8000]
     last_error = None
     for attempt in range(max_retries):
         try:
-            resp = requests.post(
-                f"{OLLAMA_BASE}/api/embeddings",
-                json={"model": EMBED_MODEL, "prompt": text},
-                timeout=120,
-            )
-            resp.raise_for_status()
-            return resp.json()["embedding"]
+            client = _get_hf_client()
+            result = client.feature_extraction(text, model=EMBED_MODEL)
+            if hasattr(result, "tolist"):
+                result = result.tolist()
+            if isinstance(result, list) and len(result) > 0 and isinstance(result[0], list):
+                return result[0]
+            if isinstance(result, list) and isinstance(result[0], (int, float)):
+                return result
+            raise ValueError(f"Unexpected embedding format: {type(result)}")
         except Exception as e:
             last_error = e
             if attempt < max_retries - 1:
@@ -395,26 +410,38 @@ def get_embedding(text: str, max_retries: int = 5) -> list[float]:
 # Step 6: Qdrant Storage
 # =============================================================================
 
-def init_qdrant() -> QdrantClient:
+def init_qdrant(session_id: str) -> QdrantClient:
     client = QdrantClient(path=str(QDRANT_PATH))
+    collection_name = f"{COLLECTION_PREFIX}_{session_id}"
 
     test_emb = get_embedding("dimension test")
     dim = len(test_emb)
     log.info(f"Embedding dimension: {dim}")
 
     collections = [c.name for c in client.get_collections().collections]
-    if COLLECTION_NAME not in collections:
+    if collection_name not in collections:
         client.create_collection(
-            collection_name=COLLECTION_NAME,
+            collection_name=collection_name,
             vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
         )
-        log.info(f"Created collection: {COLLECTION_NAME}")
+        log.info(f"Created collection: {collection_name}")
 
-    return client
+    return client, collection_name
+
+
+def clear_session(session_id: str):
+    """Delete the Qdrant collection for a session."""
+    client = QdrantClient(path=str(QDRANT_PATH))
+    collection_name = f"{COLLECTION_PREFIX}_{session_id}"
+    try:
+        client.delete_collection(collection_name)
+        log.info(f"Cleared collection: {collection_name}")
+    except Exception:
+        pass
 
 
 def store_chunks(
-    client: QdrantClient, paper: dict, pdf_path: Path, chunks: list[dict]
+    client: QdrantClient, collection_name: str, paper: dict, pdf_path: Path, chunks: list[dict]
 ):
     paper_id = paper.get("paperId") or hashlib.md5(pdf_path.name.encode()).hexdigest()
     title = paper.get("title", pdf_path.stem)
@@ -447,7 +474,7 @@ def store_chunks(
         points.append(PointStruct(id=point_id, vector=emb, payload=payload))
 
     if points:
-        client.upsert(collection_name=COLLECTION_NAME, points=points)
+        client.upsert(collection_name=collection_name, points=points)
     log.info(f"  Stored {len(points)} chunks" + (f" ({skipped} skipped)" if skipped else ""))
 
 
@@ -455,20 +482,23 @@ def store_chunks(
 # Main
 # =============================================================================
 
-def main():
+def run_pipeline(query: str, session_id: str = "default"):
+    """Run the full fetch-and-index pipeline for a given query and session."""
     PDF_DIR.mkdir(parents=True, exist_ok=True)
     QDRANT_PATH.mkdir(parents=True, exist_ok=True)
 
+    clear_session(session_id)
+
     log.info("=" * 60)
     log.info("Step 1: Extracting keywords...")
-    keywords = extract_keywords(QUERY)
+    keywords = extract_keywords(query)
 
     log.info("=" * 60)
     log.info("Step 2: Fetching papers from Semantic Scholar...")
     papers = fetch_papers(keywords)
     if not papers:
         log.error("No papers found!")
-        sys.exit(1)
+        return
 
     log.info("=" * 60)
     log.info("Step 3: Downloading PDFs...")
@@ -486,18 +516,18 @@ def main():
     log.info(f"Downloaded {len(downloaded)}/{len(papers)} PDFs")
     if not downloaded:
         log.error("No PDFs downloaded!")
-        sys.exit(1)
+        return
 
     log.info("=" * 60)
     log.info("Step 4: Initializing Qdrant...")
-    client = init_qdrant()
+    client, collection_name = init_qdrant(session_id)
 
     log.info("=" * 60)
     log.info("Step 5: Chunking and storing...")
     for i, (paper, pdf_path) in enumerate(downloaded):
         log.info(f"[{i+1:2d}/{len(downloaded)}] {pdf_path.name}")
         chunks = chunk_pdf(pdf_path)
-        store_chunks(client, paper, pdf_path, chunks)
+        store_chunks(client, collection_name, paper, pdf_path, chunks)
         time.sleep(0.3)
 
     log.info("=" * 60)
@@ -507,4 +537,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1:
+        query = " ".join(sys.argv[1:])
+    else:
+        query = input("Enter your research query: ").strip()
+    if not query:
+        print("No query provided.")
+        sys.exit(1)
+    run_pipeline(query)
