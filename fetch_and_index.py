@@ -99,12 +99,16 @@ S2_BASE = "https://api.semanticscholar.org/graph/v1"
 S2_FIELDS = "title,abstract,year,citationCount,externalIds,openAccessPdf,publicationDate,authors"
 
 
-def _s2_search(keywords: str, sort: str, limit: int) -> list[dict]:
+def _s2_search(keywords: str, sort: str, limit: int, progress_callback=None) -> list[dict]:
     papers = []
     offset = 0
     batch_size = min(limit, 100)
+    attempt = 0
 
     while len(papers) < limit:
+        attempt += 1
+        if progress_callback:
+            progress_callback("fetching_papers", f"Searching Semantic Scholar (attempt {attempt}, found {len(papers)} papers)...")
         params = {
             "query": keywords,
             "limit": batch_size,
@@ -115,6 +119,8 @@ def _s2_search(keywords: str, sort: str, limit: int) -> list[dict]:
         resp = requests.get(f"{S2_BASE}/paper/search", params=params, timeout=30)
         if resp.status_code == 429:
             log.warning("Rate limited (429), waiting 5s...")
+            if progress_callback:
+                progress_callback("fetching_papers", "Rate limited by Semantic Scholar, waiting...")
             time.sleep(5)
             continue
         resp.raise_for_status()
@@ -131,15 +137,17 @@ def _s2_search(keywords: str, sort: str, limit: int) -> list[dict]:
     return papers[:limit]
 
 
-def fetch_papers(keywords: str) -> list[dict]:
+def fetch_papers(keywords: str, progress_callback=None) -> list[dict]:
     top_n = math.ceil(TOTAL_PAPERS * TOP_CITED_RATIO)
     recent_n = math.ceil(TOTAL_PAPERS * RECENT_RATIO)
 
-    log.info(f"Fetching {top_n} top-cited papers...")
-    cited = _s2_search(keywords, sort="citationCount:desc", limit=top_n * 3)
+    if progress_callback:
+        progress_callback("fetching_papers", "Searching for top-cited papers...")
+    cited = _s2_search(keywords, sort="citationCount:desc", limit=top_n * 3, progress_callback=progress_callback)
 
-    log.info(f"Fetching {recent_n} recent papers...")
-    recent = _s2_search(keywords, sort="publicationDate:desc", limit=recent_n * 3)
+    if progress_callback:
+        progress_callback("fetching_papers", "Searching for recent papers...")
+    recent = _s2_search(keywords, sort="publicationDate:desc", limit=recent_n * 3, progress_callback=progress_callback)
 
     seen = set()
     merged = []
@@ -489,26 +497,30 @@ def store_chunks(
 # Main
 # =============================================================================
 
-def run_pipeline(query: str, session_id: str = "default"):
+def run_pipeline(query: str, session_id: str = "default", progress_callback=None):
     """Run the full fetch-and-index pipeline for a given query and session."""
     PDF_DIR.mkdir(parents=True, exist_ok=True)
     QDRANT_PATH.mkdir(parents=True, exist_ok=True)
 
     clear_session(session_id)
 
-    log.info("=" * 60)
-    log.info("Step 1: Extracting keywords...")
+    def _progress(step, detail=""):
+        log.info(f"Progress: {step} - {detail}")
+        if progress_callback:
+            progress_callback(step, detail)
+
+    _progress("extracting_keywords", "Extracting keywords from your query...")
     keywords = extract_keywords(query)
+    _progress("extracting_keywords", f"Keywords: {keywords}")
 
-    log.info("=" * 60)
-    log.info("Step 2: Fetching papers from Semantic Scholar...")
-    papers = fetch_papers(keywords)
+    _progress("fetching_papers", "Searching Semantic Scholar for relevant papers...")
+    papers = fetch_papers(keywords, progress_callback=progress_callback)
     if not papers:
-        log.error("No papers found!")
+        _progress("error", "No papers found!")
         return
+    _progress("fetching_papers", f"Found {len(papers)} papers on ArXiv")
 
-    log.info("=" * 60)
-    log.info("Step 3: Downloading PDFs...")
+    _progress("downloading_pdfs", f"Downloading PDFs (0/{len(papers)})...")
     downloaded = []
     for i, paper in enumerate(papers):
         title = paper.get("title", "Unknown")[:80]
@@ -518,25 +530,26 @@ def run_pipeline(query: str, session_id: str = "default"):
         path = download_pdf(paper)
         if path:
             downloaded.append((paper, path))
+        _progress("downloading_pdfs", f"Downloading PDFs ({len(downloaded)}/{len(papers)})...")
         time.sleep(0.5)
 
-    log.info(f"Downloaded {len(downloaded)}/{len(papers)} PDFs")
     if not downloaded:
-        log.error("No PDFs downloaded!")
+        _progress("error", "No PDFs downloaded!")
         return
+    _progress("downloading_pdfs", f"Downloaded {len(downloaded)} PDFs")
 
-    log.info("=" * 60)
-    log.info("Step 4: Initializing Qdrant...")
+    _progress("initializing_qdrant", "Initializing vector database...")
     client, collection_name = init_qdrant(session_id)
 
-    log.info("=" * 60)
-    log.info("Step 5: Chunking and storing...")
+    _progress("chunking_storing", f"Chunking and embedding papers (0/{len(downloaded)})...")
     for i, (paper, pdf_path) in enumerate(downloaded):
         log.info(f"[{i+1:2d}/{len(downloaded)}] {pdf_path.name}")
         chunks = chunk_pdf(pdf_path)
         store_chunks(client, collection_name, paper, pdf_path, chunks)
+        _progress("chunking_storing", f"Chunking and embedding papers ({i+1}/{len(downloaded)})...")
         time.sleep(0.3)
 
+    _progress("done", f"All done! {len(downloaded)} papers indexed.")
     log.info("=" * 60)
     log.info("Done! All papers processed and stored in Qdrant.")
     log.info(f"PDFs saved to: {PDF_DIR}")
