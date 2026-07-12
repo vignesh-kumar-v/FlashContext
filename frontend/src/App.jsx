@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
+import katex from "katex";
+import "katex/dist/katex.min.css";
 
 const API_WS = "ws://localhost:8000/ws";
 
@@ -6,19 +8,97 @@ function generateId() {
   return Math.random().toString(36).slice(2, 10);
 }
 
+const STEP_LABELS = {
+  extracting_keywords: "Extracting keywords",
+  fetching_papers: "Searching Semantic Scholar",
+  downloading_pdfs: "Downloading PDFs",
+  initializing_qdrant: "Initializing vector DB",
+  chunking_storing: "Chunking & embedding",
+  done: "Done",
+  error: "Error",
+};
+
+const STEP_ICONS = {
+  extracting_keywords: "🔍",
+  fetching_papers: "📚",
+  downloading_pdfs: "⬇️",
+  initializing_qdrant: "🗄️",
+  chunking_storing: "🧩",
+  done: "✅",
+  error: "❌",
+};
+
+function renderLatex(text) {
+  if (!text || !text.includes("$")) return text;
+  const parts = [];
+  let remaining = text;
+  let key = 0;
+  let iterations = 0;
+  const MAX_ITERATIONS = 500;
+
+  while (remaining.length > 0 && iterations < MAX_ITERATIONS) {
+    iterations++;
+    const displayMatch = remaining.match(/\$\$([\s\S]*?)\$\$/);
+    const inlineMatch = remaining.match(/(?<!\$)\$(?!\$)([\s\S]*?)\$(?!\$)/);
+
+    let match, isDisplay;
+    if (displayMatch && (!inlineMatch || displayMatch.index <= inlineMatch.index)) {
+      match = displayMatch;
+      isDisplay = true;
+    } else if (inlineMatch) {
+      match = inlineMatch;
+      isDisplay = false;
+    } else {
+      parts.push(<span key={key++}>{remaining}</span>);
+      break;
+    }
+
+    if (match.index > 0) {
+      parts.push(<span key={key++}>{remaining.slice(0, match.index)}</span>);
+    }
+
+    try {
+      const html = katex.renderToString(match[1], {
+        displayMode: isDisplay,
+        throwOnError: false,
+      });
+      parts.push(
+        <span
+          key={key++}
+          className={isDisplay ? "block text-center my-3" : ""}
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+      );
+    } catch {
+      parts.push(<span key={key++} className="font-mono text-sm">{match[0]}</span>);
+    }
+
+    remaining = remaining.slice(match.index + match[0].length);
+  }
+
+  if (iterations >= MAX_ITERATIONS) {
+    parts.push(<span key={key++}>{remaining}</span>);
+  }
+
+  return parts;
+}
+
 export default function App() {
   const [sessionId] = useState(() => generateId());
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
-  const [status, setStatus] = useState("idle"); // idle | scraping | querying
+  const [status, setStatus] = useState("idle");
   const [progress, setProgress] = useState(null);
   const [dbReady, setDbReady] = useState(false);
+  const [showWelcome, setShowWelcome] = useState(true);
+  const [streamingText, setStreamingText] = useState("");
+  const [streamingSources, setStreamingSources] = useState(null);
   const wsRef = useRef(null);
   const chatRef = useRef(null);
 
   useEffect(() => {
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages]);
+  }, [messages, streamingText, progress]);
 
   const sendMessage = useCallback(
     (type, query) => {
@@ -27,8 +107,11 @@ export default function App() {
       const msgId = generateId();
       setMessages((prev) => [...prev, { id: msgId, role: "user", content: query }]);
       setInput("");
+      setShowWelcome(false);
       setStatus(type === "scrape" ? "scraping" : "querying");
       setProgress(null);
+      setStreamingText("");
+      setStreamingSources(null);
 
       const ws = new WebSocket(API_WS);
       wsRef.current = ws;
@@ -39,7 +122,10 @@ export default function App() {
 
       ws.onmessage = (e) => {
         const data = JSON.parse(e.data);
-        if (data.status === "PROGRESS") {
+
+        if (data.token) {
+          setStreamingText((prev) => prev + data.token);
+        } else if (data.status === "PROGRESS") {
           setProgress(data.progress);
         } else if (data.status === "SUCCESS") {
           if (type === "scrape") {
@@ -54,15 +140,18 @@ export default function App() {
               },
             ]);
           } else {
+            const result = data.result;
             setMessages((prev) => [
               ...prev,
               {
                 id: generateId(),
                 role: "assistant",
-                content: data.result.answer,
-                sources: data.result.sources || [],
+                content: result.answer || streamingText,
+                sources: result.sources || [],
               },
             ]);
+            setStreamingText("");
+            setStreamingSources(null);
           }
           setStatus("idle");
           setProgress(null);
@@ -79,6 +168,7 @@ export default function App() {
           ]);
           setStatus("idle");
           setProgress(null);
+          setStreamingText("");
           ws.close();
         }
       };
@@ -90,9 +180,10 @@ export default function App() {
         ]);
         setStatus("idle");
         setProgress(null);
+        setStreamingText("");
       };
     },
-    [status, sessionId]
+    [status, sessionId, streamingText]
   );
 
   const handleScrape = () => sendMessage("scrape", input);
@@ -107,7 +198,15 @@ export default function App() {
   return (
     <div className="h-screen flex flex-col overflow-hidden">
       <Header sessionId={sessionId} dbReady={dbReady} />
-      <ChatArea messages={messages} status={status} progress={progress} chatRef={chatRef} />
+      <ChatArea
+        messages={messages}
+        status={status}
+        progress={progress}
+        chatRef={chatRef}
+        showWelcome={showWelcome}
+        streamingText={streamingText}
+        streamingSources={streamingSources}
+      />
       <InputBar
         input={input}
         setInput={setInput}
@@ -150,28 +249,66 @@ function Header({ sessionId, dbReady }) {
   );
 }
 
-function ChatArea({ messages, status, progress, chatRef }) {
+function ChatArea({ messages, status, progress, chatRef, showWelcome, streamingText, streamingSources }) {
   return (
     <main ref={chatRef} className="flex-1 overflow-y-auto px-4 py-6 space-y-4">
-      {messages.length === 0 && (
-        <div className="flex flex-col items-center justify-center h-full text-center fade-in">
-          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-indigo-500/20 to-purple-600/20 border border-indigo-500/20 flex items-center justify-center mb-6">
-            <svg className="w-8 h-8 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
-            </svg>
-          </div>
-          <h2 className="text-xl font-semibold text-gray-200 mb-2">Research RAG Assistant</h2>
-          <p className="text-gray-500 max-w-md text-sm leading-relaxed">
-            Enter a research topic to fetch and index papers, then ask questions about them.
-            Powered by Semantic Scholar, ArXiv, and GLM-5.2.
-          </p>
-        </div>
-      )}
+      {showWelcome && messages.length === 0 && <WelcomeMessage />}
       {messages.map((msg) => (
         <Message key={msg.id} msg={msg} />
       ))}
-      {status !== "idle" && <LoadingBubble status={status} progress={progress} />}
+      {streamingText && (
+        <StreamingMessage text={streamingText} sources={streamingSources} />
+      )}
+      {status !== "idle" && !streamingText && (
+        status === "scraping" ? (
+          <ProgressCard status={status} progress={progress} />
+        ) : (
+          <LoadingBubble />
+        )
+      )}
     </main>
+  );
+}
+
+function WelcomeMessage() {
+  return (
+    <div className="flex flex-col items-center justify-center h-full text-center fade-in">
+      <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-indigo-500/20 to-purple-600/20 border border-indigo-500/20 flex items-center justify-center mb-6">
+        <svg className="w-10 h-10 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
+        </svg>
+      </div>
+      <h2 className="text-2xl font-semibold text-gray-100 mb-3">
+        What are you working on today?
+      </h2>
+      <p className="text-gray-500 max-w-md text-sm leading-relaxed">
+        Tell me your research topic and I'll fetch relevant papers, index them, and answer your questions.
+      </p>
+      <div className="mt-8 flex flex-wrap gap-3 justify-center max-w-lg">
+        {[
+          "Diffusion models for image generation",
+          "Transformer attention mechanisms",
+          "Reinforcement learning from human feedback",
+          "Graph neural networks for drug discovery",
+        ].map((suggestion) => (
+          <button
+            key={suggestion}
+            onClick={() => {
+              const input = document.querySelector("textarea");
+              if (input) {
+                const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+                nativeInputValueSetter.call(input, suggestion);
+                input.dispatchEvent(new Event("input", { bubbles: true }));
+                input.focus();
+              }
+            }}
+            className="glass-hover glass rounded-full px-4 py-2 text-xs text-gray-400 hover:text-gray-200 transition-all cursor-pointer"
+          >
+            {suggestion}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -194,7 +331,7 @@ function Message({ msg }) {
               : "glass text-gray-200"
           }`}
         >
-          <div className="whitespace-pre-wrap">{msg.content}</div>
+          <div className="whitespace-pre-wrap">{isUser ? msg.content : renderLatex(msg.content)}</div>
         </div>
         {msg.sources && msg.sources.length > 0 && (
           <div className="mt-2 space-y-1">
@@ -212,14 +349,52 @@ function Message({ msg }) {
   );
 }
 
-function LoadingBubble({ status, progress }) {
-  const label = status === "scraping" ? "Fetching & indexing papers" : "Searching & generating";
+function StreamingMessage({ text, sources }) {
+  return (
+    <div className="flex gap-3 slide-up">
+      <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shrink-0 mt-0.5">
+        <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+        </svg>
+      </div>
+      <div className="max-w-[75%]">
+        <div className="glass rounded-2xl px-4 py-3 text-sm leading-relaxed text-gray-200 relative overflow-hidden">
+          <div className="whitespace-pre-wrap">
+            {text}
+            <span className="inline-block w-2 h-4 bg-indigo-400 ml-0.5 align-middle animate-pulse rounded-sm" />
+          </div>
+          <div
+            className="absolute bottom-0 left-0 right-0 h-px"
+            style={{
+              background: "linear-gradient(90deg, transparent, #818cf8, #c084fc, transparent)",
+              animation: "shimmer 2s ease-in-out infinite",
+            }}
+          />
+        </div>
+        {sources && sources.length > 0 && (
+          <div className="mt-2 space-y-1">
+            <p className="text-xs text-gray-500 font-medium mb-1">Sources</p>
+            {sources.map((s, i) => (
+              <div key={i} className="glass rounded-lg px-3 py-1.5 text-xs flex items-center justify-between">
+                <span className="text-gray-300 truncate mr-2">{s.title}</span>
+                <span className="text-indigo-400 font-mono shrink-0">{s.score.toFixed(3)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ProgressCard({ status, progress }) {
   const step = progress?.step || "";
-  const stepLabels = {
-    extracting_keywords: "Extracting keywords...",
-    searching_qdrant: "Searching knowledge base...",
-    generating_response: "Generating answer...",
-  };
+  const detail = progress?.detail || "";
+
+  const steps = ["extracting_keywords", "fetching_papers", "downloading_pdfs", "initializing_qdrant", "chunking_storing", "done"];
+
+  const currentIdx = steps.indexOf(step);
+  const progressPct = step === "done" ? 100 : step === "error" ? 0 : Math.max(5, ((currentIdx) / steps.length) * 100);
 
   return (
     <div className="flex gap-3 slide-up">
@@ -229,13 +404,62 @@ function LoadingBubble({ status, progress }) {
           <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
         </svg>
       </div>
-      <div className="glass rounded-2xl px-4 py-3">
-        <p className="text-sm text-gray-300">{label}</p>
-        {step && (
-          <p className="text-xs text-indigo-400 mt-1 typing-cursor">
-            {stepLabels[step] || step}
-          </p>
+      <div className="glass rounded-2xl px-5 py-4 flex-1 max-w-md">
+        <p className="text-sm font-medium text-gray-200 mb-3">Fetching & indexing papers</p>
+
+        <div className="w-full h-2 bg-gray-800 rounded-full overflow-hidden mb-3">
+          <div
+            className="h-full rounded-full transition-all duration-700 ease-out"
+            style={{
+              width: `${progressPct}%`,
+              background: "linear-gradient(90deg, #818cf8, #c084fc, #f472b6)",
+            }}
+          />
+        </div>
+
+        <div className="flex gap-1.5 mb-3">
+          {steps.map((s, i) => {
+            const done = i < currentIdx;
+            const active = i === currentIdx;
+            return (
+              <div
+                key={s}
+                className="flex-1 h-1 rounded-full transition-all duration-500"
+                style={{
+                  background: done
+                    ? "linear-gradient(90deg, #818cf8, #c084fc)"
+                    : active
+                    ? "#6366f1"
+                    : "#374151",
+                }}
+              />
+            );
+          })}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span className="text-sm">{STEP_ICONS[step] || "⏳"}</span>
+          <span className="text-sm text-gray-300">{STEP_LABELS[step] || step}</span>
+        </div>
+        {detail && (
+          <p className="text-xs text-indigo-400 mt-1.5 ml-7 typing-cursor">{detail}</p>
         )}
+      </div>
+    </div>
+  );
+}
+
+function LoadingBubble() {
+  return (
+    <div className="flex gap-3 slide-up">
+      <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shrink-0 mt-0.5">
+        <svg className="w-4 h-4 text-white animate-spin" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+        </svg>
+      </div>
+      <div className="glass rounded-2xl px-4 py-3">
+        <p className="text-sm text-gray-300">Searching & generating...</p>
       </div>
     </div>
   );
@@ -245,7 +469,7 @@ function InputBar({ input, setInput, onSend, onKeyDown, status, dbReady }) {
   const busy = status !== "idle";
   const placeholder = dbReady
     ? "Ask a question about the papers..."
-    : "Enter a research topic to fetch papers...";
+    : "Tell me what you're working on...";
 
   return (
     <footer className="glass shrink-0 px-4 py-3 z-10">
