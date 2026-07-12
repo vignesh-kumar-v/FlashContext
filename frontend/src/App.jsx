@@ -83,31 +83,70 @@ function renderLatex(text) {
   return parts;
 }
 
+function createSession() {
+  return {
+    id: generateId(),
+    messages: [],
+    dbReady: false,
+    showWelcome: true,
+  };
+}
+
 export default function App() {
-  const [sessionId] = useState(() => generateId());
-  const [messages, setMessages] = useState([]);
+  const [sessions, setSessions] = useState(() => {
+    const initial = createSession();
+    return { [initial.id]: initial };
+  });
+  const [activeSession, setActiveSession] = useState(() => Object.keys(sessions)[0]);
   const [input, setInput] = useState("");
   const [status, setStatus] = useState("idle");
   const [progress, setProgress] = useState(null);
-  const [dbReady, setDbReady] = useState(false);
-  const [showWelcome, setShowWelcome] = useState(true);
   const [streamingText, setStreamingText] = useState("");
   const [streamingSources, setStreamingSources] = useState(null);
   const wsRef = useRef(null);
   const chatRef = useRef(null);
 
+  const session = sessions[activeSession];
+  const sessionId = activeSession;
+
+  const updateSession = useCallback((updater) => {
+    setSessions((prev) => ({
+      ...prev,
+      [activeSession]: { ...prev[activeSession], ...updater },
+    }));
+  }, [activeSession]);
+
+  const newSession = useCallback(() => {
+    if (status !== "idle") return;
+    const s = createSession();
+    setSessions((prev) => ({ ...prev, [s.id]: s }));
+    setActiveSession(s.id);
+    setInput("");
+    setProgress(null);
+    setStreamingText("");
+    setStreamingSources(null);
+  }, [status]);
+
+  const switchSession = useCallback((id) => {
+    if (status !== "idle" || id === activeSession) return;
+    setActiveSession(id);
+    setInput("");
+    setProgress(null);
+    setStreamingText("");
+    setStreamingSources(null);
+  }, [status, activeSession]);
+
   useEffect(() => {
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, streamingText, progress]);
+  }, [session?.messages, streamingText, progress]);
 
   const sendMessage = useCallback(
     (type, query) => {
       if (!query.trim() || status !== "idle") return;
 
       const msgId = generateId();
-      setMessages((prev) => [...prev, { id: msgId, role: "user", content: query }]);
+      updateSession({ messages: [...session.messages, { id: msgId, role: "user", content: query }], showWelcome: false });
       setInput("");
-      setShowWelcome(false);
       setStatus(type === "scrape" ? "scraping" : "querying");
       setProgress(null);
       setStreamingText("");
@@ -129,27 +168,33 @@ export default function App() {
           setProgress(data.progress);
         } else if (data.status === "SUCCESS") {
           if (type === "scrape") {
-            setDbReady(true);
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: generateId(),
-                role: "assistant",
-                content: "Papers fetched and indexed. You can now ask questions about this topic.",
-                sources: null,
-              },
-            ]);
+            updateSession({
+              dbReady: true,
+              messages: [
+                ...session.messages,
+                { id: msgId, role: "user", content: query },
+                {
+                  id: generateId(),
+                  role: "assistant",
+                  content: "Papers fetched and indexed. You can now ask questions about this topic.",
+                  sources: null,
+                },
+              ],
+            });
           } else {
             const result = data.result;
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: generateId(),
-                role: "assistant",
-                content: result.answer || streamingText,
-                sources: result.sources || [],
-              },
-            ]);
+            updateSession({
+              messages: [
+                ...session.messages,
+                { id: msgId, role: "user", content: query },
+                {
+                  id: generateId(),
+                  role: "assistant",
+                  content: result.answer || streamingText,
+                  sources: result.sources || [],
+                },
+              ],
+            });
             setStreamingText("");
             setStreamingSources(null);
           }
@@ -157,15 +202,18 @@ export default function App() {
           setProgress(null);
           ws.close();
         } else if (data.status === "FAILURE" || data.status === "ERROR") {
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: generateId(),
-              role: "assistant",
-              content: `Error: ${data.result?.error || "Something went wrong"}`,
-              sources: null,
-            },
-          ]);
+          updateSession({
+            messages: [
+              ...session.messages,
+              { id: msgId, role: "user", content: query },
+              {
+                id: generateId(),
+                role: "assistant",
+                content: `Error: ${data.result?.error || "Something went wrong"}`,
+                sources: null,
+              },
+            ],
+          });
           setStatus("idle");
           setProgress(null);
           setStreamingText("");
@@ -174,16 +222,19 @@ export default function App() {
       };
 
       ws.onerror = () => {
-        setMessages((prev) => [
-          ...prev,
-          { id: generateId(), role: "assistant", content: "Connection error. Is the backend running?", sources: null },
-        ]);
+        updateSession({
+          messages: [
+            ...session.messages,
+            { id: msgId, role: "user", content: query },
+            { id: generateId(), role: "assistant", content: "Connection error. Is the backend running?", sources: null },
+          ],
+        });
         setStatus("idle");
         setProgress(null);
         setStreamingText("");
       };
     },
-    [status, sessionId, streamingText]
+    [status, sessionId, session, updateSession, streamingText]
   );
 
   const handleScrape = () => sendMessage("scrape", input);
@@ -191,35 +242,45 @@ export default function App() {
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      dbReady ? handleQuery() : handleScrape();
+      session.dbReady ? handleQuery() : handleScrape();
     }
   };
 
   return (
     <div className="h-screen flex flex-col overflow-hidden">
-      <Header sessionId={sessionId} dbReady={dbReady} />
+      <Header
+        sessionId={sessionId}
+        dbReady={session.dbReady}
+        onNewSession={newSession}
+        sessions={sessions}
+        activeSession={activeSession}
+        onSwitchSession={switchSession}
+      />
       <ChatArea
-        messages={messages}
+        messages={session.messages}
         status={status}
         progress={progress}
         chatRef={chatRef}
-        showWelcome={showWelcome}
+        showWelcome={session.showWelcome}
         streamingText={streamingText}
         streamingSources={streamingSources}
       />
       <InputBar
         input={input}
         setInput={setInput}
-        onSend={dbReady ? handleQuery : handleScrape}
+        onSend={session.dbReady ? handleQuery : handleScrape}
         onKeyDown={handleKeyDown}
         status={status}
-        dbReady={dbReady}
+        dbReady={session.dbReady}
       />
     </div>
   );
 }
 
-function Header({ sessionId, dbReady }) {
+function Header({ sessionId, dbReady, onNewSession, sessions, activeSession, onSwitchSession }) {
+  const [open, setOpen] = useState(false);
+  const sessionList = Object.values(sessions);
+
   return (
     <header className="glass shrink-0 px-6 py-3 flex items-center justify-between z-10">
       <div className="flex items-center gap-3">
@@ -233,10 +294,46 @@ function Header({ sessionId, dbReady }) {
           <span className="text-gray-300">Context</span>
         </h1>
       </div>
-      <div className="flex items-center gap-4 text-sm">
+      <div className="flex items-center gap-3 text-sm">
+        {sessionList.length > 1 && (
+          <div className="relative">
+            <button
+              onClick={() => setOpen(!open)}
+              className="glass-hover glass rounded-lg px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200 transition-all flex items-center gap-1.5"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+              </svg>
+              Sessions ({sessionList.length})
+            </button>
+            {open && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+                <div className="absolute right-0 top-full mt-1 w-64 glass rounded-xl py-1 z-20 shadow-2xl">
+                  {sessionList.map((s) => (
+                    <button
+                      key={s.id}
+                      onClick={() => { onSwitchSession(s.id); setOpen(false); }}
+                      className={`w-full text-left px-4 py-2 text-xs flex items-center justify-between transition-colors ${
+                        s.id === activeSession
+                          ? "bg-indigo-500/20 text-indigo-300"
+                          : "text-gray-400 hover:bg-gray-800/50 hover:text-gray-200"
+                      }`}
+                    >
+                      <span className="flex items-center gap-2">
+                        <code className="font-mono text-[10px] bg-gray-800/50 px-1.5 py-0.5 rounded">{s.id}</code>
+                        {s.dbReady && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />}
+                      </span>
+                      <span className="text-gray-600 text-[10px]">{s.messages.length} msgs</span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
         <div className="flex items-center gap-2 text-gray-400">
-          <span className="text-gray-600">session</span>
-          <code className="font-mono text-xs bg-gray-800/50 px-2 py-0.5 rounded text-indigo-400">{sessionId}</code>
+          <code className="font-mono text-[10px] bg-gray-800/50 px-2 py-0.5 rounded text-indigo-400">{sessionId}</code>
         </div>
         {dbReady && (
           <div className="flex items-center gap-1.5 text-emerald-400">
@@ -244,6 +341,15 @@ function Header({ sessionId, dbReady }) {
             <span className="text-xs font-medium">DB Ready</span>
           </div>
         )}
+        <button
+          onClick={onNewSession}
+          className="glass-hover glass rounded-lg px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200 transition-all flex items-center gap-1.5"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+          </svg>
+          New Session
+        </button>
       </div>
     </header>
   );
