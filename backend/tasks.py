@@ -44,6 +44,6 @@ def run_rag_query(self, query: str, session_id: str = "default"):
         full_response += token
         r.publish(channel, json.dumps({"token": token}))
 
-    r.publish(channel, json.dumps({"done": True}))
+    r.publish(channel, json.dumps({"done": True, "answer": full_response, "sources": sources}))
 
     return {"status": "completed", "query": query, "answer": full_response, "sources": sources}
