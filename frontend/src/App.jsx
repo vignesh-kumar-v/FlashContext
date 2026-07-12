@@ -28,6 +28,163 @@ const STEP_ICONS = {
   error: "❌",
 };
 
+function renderContent(text) {
+  if (!text) return text;
+  const parts = [];
+  let remaining = text;
+  let key = 0;
+
+  while (remaining.length > 0) {
+    const codeMatch = remaining.match(/```(\w*)\n?([\s\S]*?)```/);
+    if (!codeMatch) {
+      parts.push(<span key={key++}>{renderMarkdown(remaining)}</span>);
+      break;
+    }
+
+    if (codeMatch.index > 0) {
+      parts.push(<span key={key++}>{renderMarkdown(remaining.slice(0, codeMatch.index))}</span>);
+    }
+
+    const lang = codeMatch[1] || "plaintext";
+    const code = codeMatch[2].replace(/\n$/, "");
+    parts.push(<CodeBlock key={key++} language={lang} code={code} />);
+
+    remaining = remaining.slice(codeMatch.index + codeMatch[0].length);
+  }
+
+  return parts;
+}
+
+function renderMarkdown(text) {
+  if (!text) return text;
+  const lines = text.split("\n");
+  const elements = [];
+  let key = 0;
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Heading
+    const headingMatch = line.match(/^(#{1,3})\s+(.+)/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const content = headingMatch[2];
+      const sizes = { 1: "text-lg", 2: "text-base", 3: "text-sm" };
+      const margins = { 1: "mt-4 mb-2", 2: "mt-3 mb-1.5", 3: "mt-2 mb-1" };
+      elements.push(
+        <div key={key++} className={`${margins[level]} ${sizes[level]} font-semibold text-gray-100`}>
+          {renderInlineMarkdown(content)}
+        </div>
+      );
+      i++;
+      continue;
+    }
+
+    // Numbered list
+    const numberedMatch = line.match(/^(\d+)\.\s+(.+)/);
+    if (numberedMatch) {
+      const items = [];
+      while (i < lines.length) {
+        const m = lines[i].match(/^(\d+)\.\s+(.+)/);
+        if (!m) break;
+        items.push(m[2]);
+        i++;
+      }
+      elements.push(
+        <ol key={key++} className="list-decimal list-inside space-y-1 my-2 text-sm text-gray-200">
+          {items.map((item, idx) => (
+            <li key={idx} className="pl-1">{renderInlineMarkdown(item)}</li>
+          ))}
+        </ol>
+      );
+      continue;
+    }
+
+    // Bullet list
+    const bulletMatch = line.match(/^[\*\-]\s+(.+)/);
+    if (bulletMatch) {
+      const items = [];
+      while (i < lines.length) {
+        const m = lines[i].match(/^[\*\-]\s+(.+)/);
+        if (!m) break;
+        items.push(m[1]);
+        i++;
+      }
+      elements.push(
+        <ul key={key++} className="list-disc list-inside space-y-1 my-2 text-sm text-gray-200">
+          {items.map((item, idx) => (
+            <li key={idx} className="pl-1">{renderInlineMarkdown(item)}</li>
+          ))}
+        </ul>
+      );
+      continue;
+    }
+
+    // Empty line
+    if (line.trim() === "") {
+      elements.push(<div key={key++} className="h-2" />);
+      i++;
+      continue;
+    }
+
+    // Regular paragraph
+    elements.push(
+      <p key={key++} className="text-sm text-gray-200 leading-relaxed">
+        {renderInlineMarkdown(line)}
+      </p>
+    );
+    i++;
+  }
+
+  return elements;
+}
+
+function renderInlineMarkdown(text) {
+  if (!text) return text;
+  const parts = [];
+  let remaining = text;
+  let key = 0;
+
+  while (remaining.length > 0) {
+    // Bold
+    const boldMatch = remaining.match(/\*\*(.+?)\*\*/);
+    // Italic (but not bullet)
+    const italicMatch = remaining.match(/(?<!\*)\*(?!\*)(.+?)\*(?!\*)/);
+    // Inline code
+    const codeMatch = remaining.match(/`([^`]+)`/);
+
+    const matches = [boldMatch, italicMatch, codeMatch].filter(Boolean);
+    const firstMatch = matches.reduce((earliest, m) =>
+      !earliest || m.index < earliest.index ? m : earliest, null);
+
+    if (!firstMatch) {
+      parts.push(<span key={key++}>{renderLatex(remaining)}</span>);
+      break;
+    }
+
+    if (firstMatch.index > 0) {
+      parts.push(<span key={key++}>{renderLatex(remaining.slice(0, firstMatch.index))}</span>);
+    }
+
+    if (firstMatch === boldMatch) {
+      parts.push(<strong key={key++} className="font-semibold text-gray-100">{renderLatex(boldMatch[1])}</strong>);
+    } else if (firstMatch === italicMatch) {
+      parts.push(<em key={key++} className="italic text-gray-300">{renderLatex(italicMatch[1])}</em>);
+    } else if (firstMatch === codeMatch) {
+      parts.push(
+        <code key={key++} className="font-mono text-xs bg-gray-800/70 text-indigo-300 px-1.5 py-0.5 rounded">
+          {codeMatch[1]}
+        </code>
+      );
+    }
+
+    remaining = remaining.slice(firstMatch.index + firstMatch[0].length);
+  }
+
+  return parts;
+}
+
 function renderLatex(text) {
   if (!text || !text.includes("$")) return text;
   const parts = [];
@@ -81,6 +238,48 @@ function renderLatex(text) {
   }
 
   return parts;
+}
+
+function CodeBlock({ language, code }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(code).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  return (
+    <div className="my-3 rounded-xl overflow-hidden border border-gray-700/50">
+      <div className="flex items-center justify-between px-4 py-2 bg-gray-800/80">
+        <span className="text-xs text-gray-500 font-mono">{language}</span>
+        <button
+          onClick={handleCopy}
+          className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-200 transition-colors"
+        >
+          {copied ? (
+            <>
+              <svg className="w-3.5 h-3.5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+              </svg>
+              <span className="text-emerald-400">Copied</span>
+            </>
+          ) : (
+            <>
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+              </svg>
+              <span>Copy</span>
+            </>
+          )}
+        </button>
+      </div>
+      <pre className="px-4 py-3 bg-gray-900/60 overflow-x-auto text-xs leading-relaxed">
+        <code className="font-mono text-gray-300">{code}</code>
+      </pre>
+    </div>
+  );
 }
 
 function createSession() {
@@ -437,7 +636,7 @@ function Message({ msg }) {
               : "glass text-gray-200"
           }`}
         >
-          <div className="whitespace-pre-wrap">{isUser ? msg.content : renderLatex(msg.content)}</div>
+          <div className="whitespace-pre-wrap">{isUser ? msg.content : renderContent(msg.content)}</div>
         </div>
         {msg.sources && msg.sources.length > 0 && (
           <div className="mt-2 space-y-1">
