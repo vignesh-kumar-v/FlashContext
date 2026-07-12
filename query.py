@@ -13,6 +13,7 @@ Workflow:
 
 import os
 import sys
+import json
 import logging
 from pathlib import Path
 from dotenv import load_dotenv
@@ -99,9 +100,12 @@ def build_prompt(query: str, chunks: list[dict]) -> str:
     context = "\n\n".join(context_parts)
 
     return (
-        "You are a helpful research assistant. Answer the user's question using ONLY "
-        "the provided context below. If the context does not contain enough information "
-        "to answer the question, say so honestly. Do not make up information.\n\n"
+        "You are a helpful research assistant. Answer the user's question using the "
+        "provided context as your primary source. If the context covers the topic, "
+        "use it. If the context does not have enough information, you may use your "
+        "own general knowledge to answer — but do not make up information.\n\n"
+        "IMPORTANT: Never start your answer with phrases like 'Based on the provided context' "
+        "or 'According to the context'. Just answer directly and naturally.\n\n"
         f"Context:\n{context}\n\n"
         f"Question: {query}\n\n"
         "Answer:"
@@ -116,6 +120,28 @@ def generate_response(prompt: str) -> str:
     )
     resp.raise_for_status()
     return resp.json()["response"].strip()
+
+
+def generate_response_stream(prompt: str):
+    """Stream tokens from Ollama as they are generated."""
+    resp = requests.post(
+        f"{OLLAMA_BASE}/api/generate",
+        json={"model": LLM_MODEL, "prompt": prompt, "stream": True},
+        timeout=300,
+        stream=True,
+    )
+    resp.raise_for_status()
+    for line in resp.iter_lines():
+        if line:
+            try:
+                data = json.loads(line)
+                token = data.get("response", "")
+                if token:
+                    yield token
+                if data.get("done"):
+                    break
+            except json.JSONDecodeError:
+                continue
 
 
 def _qdrant_has_data(session_id: str = "default") -> bool:
