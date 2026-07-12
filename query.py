@@ -100,10 +100,11 @@ def build_prompt(query: str, chunks: list[dict]) -> str:
     context = "\n\n".join(context_parts)
 
     return (
-        "You are a helpful research assistant. Answer the user's question using the "
-        "provided context as your primary source. If the context covers the topic, "
-        "use it. If the context does not have enough information, you may use your "
-        "own general knowledge to answer — but do not make up information.\n\n"
+        "You are a helpful research assistant. Answer the user's question using your "
+        "own knowledge and expertise. The provided context below contains relevant "
+        "research papers — use it to enrich your answer when it helps, but do not "
+        "limit yourself to it. If the user asks for code, write it. If they ask for "
+        "explanations, provide them. Be thorough and helpful.\n\n"
         "IMPORTANT: Never start your answer with phrases like 'Based on the provided context' "
         "or 'According to the context'. Just answer directly and naturally.\n\n"
         f"Context:\n{context}\n\n"
