@@ -82,3 +82,8 @@ body {
 @keyframes blink {
   50% { opacity: 0; }
 }
+
+@keyframes shimmer {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
