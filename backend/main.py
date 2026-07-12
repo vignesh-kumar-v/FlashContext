@@ -116,16 +116,18 @@ async def _stream_query(task_id: str, session_id: str, websocket: WebSocket):
             elif "progress" in data:
                 await websocket.send_json({"status": "PROGRESS", "progress": data["progress"]})
             elif data.get("done"):
+                await websocket.send_json({
+                    "status": "SUCCESS",
+                    "result": {
+                        "status": "completed",
+                        "answer": data["answer"],
+                        "sources": data["sources"],
+                    },
+                })
                 break
     finally:
         await pubsub.unsubscribe()
         await pubsub.close()
-
-    result = await asyncio.to_thread(AsyncResult, task_id, app=run_rag_query)
-    if result.state == "SUCCESS":
-        await websocket.send_json({"status": "SUCCESS", "result": result.result})
-    elif result.state == "FAILURE":
-        await websocket.send_json({"status": "FAILURE", "result": {"error": str(result.info)}})
 
 
 @app.websocket("/ws")
