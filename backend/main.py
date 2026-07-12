@@ -1,9 +1,12 @@
 import asyncio
+import json
+import redis.asyncio as redis_lib
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from celery.result import AsyncResult
 
 from backend.tasks import run_scraping_job, run_rag_query
+from backend.config import REDIS_BROKER_URL
 
 app = FastAPI(title="FlashContext", version="1.0.0")
 
@@ -96,6 +99,35 @@ async def _poll_task(task_id: str, task_func, websocket: WebSocket):
         await asyncio.sleep(1)
 
 
+async def _stream_query(task_id: str, session_id: str, websocket: WebSocket):
+    r = redis_lib.from_url(REDIS_BROKER_URL)
+    pubsub = r.pubsub()
+    await pubsub.subscribe(f"stream:{session_id}")
+
+    try:
+        async for message in pubsub.listen():
+            if message["type"] != "message":
+                continue
+
+            data = json.loads(message["data"])
+
+            if "token" in data:
+                await websocket.send_json({"token": data["token"]})
+            elif "progress" in data:
+                await websocket.send_json({"status": "PROGRESS", "progress": data["progress"]})
+            elif data.get("done"):
+                break
+    finally:
+        await pubsub.unsubscribe()
+        await pubsub.close()
+
+    result = await asyncio.to_thread(AsyncResult, task_id, app=run_rag_query)
+    if result.state == "SUCCESS":
+        await websocket.send_json({"status": "SUCCESS", "result": result.result})
+    elif result.state == "FAILURE":
+        await websocket.send_json({"status": "FAILURE", "result": {"error": str(result.info)}})
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -121,7 +153,7 @@ async def websocket_endpoint(websocket: WebSocket):
     elif msg_type == "query":
         task = run_rag_query.delay(query, session_id=session_id)
         await websocket.send_json({"task_id": task.id, "status": "PENDING"})
-        await _poll_task(task.id, run_rag_query, websocket)
+        await _stream_query(task.id, session_id, websocket)
 
     else:
         await websocket.send_json({"status": "ERROR", "result": {"error": f"Unknown type: {msg_type}"}})
