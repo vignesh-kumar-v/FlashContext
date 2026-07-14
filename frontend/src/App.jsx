@@ -304,6 +304,7 @@ export default function App() {
   const [streamingSources, setStreamingSources] = useState(null);
   const wsRef = useRef(null);
   const chatRef = useRef(null);
+  const inputRef = useRef(null);
 
   const session = sessions[activeSession];
   const sessionId = activeSession;
@@ -338,6 +339,12 @@ export default function App() {
   useEffect(() => {
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: "smooth" });
   }, [session?.messages, streamingText, progress]);
+
+  useEffect(() => {
+    if (status === "idle" && session?.dbReady) {
+      inputRef.current?.focus();
+    }
+  }, [status, session?.dbReady]);
 
   const sendMessage = useCallback(
     (type, query) => {
@@ -471,6 +478,7 @@ export default function App() {
         onKeyDown={handleKeyDown}
         status={status}
         dbReady={session.dbReady}
+        inputRef={inputRef}
       />
     </div>
   );
@@ -478,10 +486,101 @@ export default function App() {
 
 function Header({ sessionId, dbReady, onNewSession, sessions, activeSession, onSwitchSession }) {
   const [open, setOpen] = useState(false);
+  const [animating, setAnimating] = useState(false);
+  const [dropletInfo, setDropletInfo] = useState(null);
+  const [sessionsPulse, setSessionsPulse] = useState(false);
+  const [showSessions, setShowSessions] = useState(() => Object.keys(sessions).length > 1);
+  
+  const newSessionBtnRef = useRef(null);
+  const sessionsBtnRef = useRef(null);
   const sessionList = Object.values(sessions);
+
+  const handleNewSession = () => {
+    if (!newSessionBtnRef.current || animating) {
+      if (!animating) onNewSession();
+      return; 
+    }
+    
+    const fromRect = newSessionBtnRef.current.getBoundingClientRect();
+    
+    setAnimating(true);
+    setDropletInfo({
+      startX: fromRect.left + fromRect.width / 2,
+      startY: fromRect.top + fromRect.height / 2,
+      startW: fromRect.width,
+      startH: fromRect.height,
+      phase: 'start'
+    });
+    
+    onNewSession();
+    setShowSessions(true);
+  };
+
+  useEffect(() => {
+    if (animating && dropletInfo && dropletInfo.phase === 'start' && sessionsBtnRef.current) {
+      const toRect = sessionsBtnRef.current.getBoundingClientRect();
+      
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          setDropletInfo(prev => ({
+            ...prev,
+            targetX: toRect.left + toRect.width / 2,
+            targetY: toRect.top + toRect.height / 2,
+            targetW: toRect.width,
+            targetH: toRect.height,
+            phase: 'moving'
+          }));
+        });
+      });
+
+      setTimeout(() => {
+        setDropletInfo(prev => ({ ...prev, phase: 'arrived' }));
+        setSessionsPulse(true);
+      }, 450);
+
+      setTimeout(() => {
+        setAnimating(false);
+        setDropletInfo(null);
+        setSessionsPulse(false);
+      }, 750);
+    }
+  }, [animating, dropletInfo, sessionList.length]);
+
+  let dropletStyle = {};
+  if (dropletInfo && dropletInfo.phase) {
+    const isMoving = dropletInfo.phase === 'moving';
+    const isArrived = dropletInfo.phase === 'arrived';
+    
+    const x = isMoving || isArrived ? dropletInfo.targetX : dropletInfo.startX;
+    const y = isMoving || isArrived ? dropletInfo.targetY : dropletInfo.startY;
+    
+    const w = isArrived ? dropletInfo.targetW : 32;
+    const h = isArrived ? dropletInfo.targetH : 32;
+    
+    dropletStyle = {
+      position: 'fixed',
+      top: 0, left: 0,
+      width: w,
+      height: h,
+      opacity: isArrived ? 0 : 1,
+      transform: `translate(${x - w/2}px, ${y - h/2}px) ${isMoving ? 'scaleX(1.3)' : 'scaleX(1)'}`,
+      transition: isArrived 
+        ? 'all 0.2s ease-out' 
+        : 'transform 0.45s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.2s ease-in, width 0.2s, height 0.2s',
+      borderRadius: '9999px',
+      background: 'radial-gradient(circle at 30% 30%, rgba(224, 231, 255, 0.9), rgba(139, 92, 246, 0.8))',
+      backdropFilter: 'blur(10px)',
+      border: '1px solid rgba(165, 180, 252, 0.8)',
+      boxShadow: '0 0 20px rgba(139, 92, 246, 0.6)',
+      zIndex: 50,
+      pointerEvents: 'none'
+    };
+  }
 
   return (
     <header className="glass shrink-0 px-6 py-3 flex items-center justify-between z-10">
+      {dropletInfo && <div style={dropletStyle} />}
+      
       <div className="flex items-center gap-3">
         <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
           <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -493,12 +592,19 @@ function Header({ sessionId, dbReady, onNewSession, sessions, activeSession, onS
           <span className="text-gray-300">Context</span>
         </h1>
       </div>
+      
       <div className="flex items-center gap-3 text-sm">
-        {sessionList.length > 1 && (
+        {sessionList.length > 1 && showSessions && (
           <div className="relative">
             <button
+              ref={sessionsBtnRef}
               onClick={() => setOpen(!open)}
-              className="glass-hover glass rounded-lg px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200 transition-all flex items-center gap-1.5"
+              className={`glass-hover glass rounded-full px-4 py-2 text-xs text-gray-300 hover:text-white transition-all flex items-center gap-1.5 ${
+                sessionsPulse ? 'scale-110 bg-indigo-500/30 text-white shadow-[0_0_20px_rgba(139,92,246,0.6)]' : 'scale-100'
+              } ${
+                animating && dropletInfo?.phase === 'start' && sessionList.length === 2 ? 'opacity-0' : 'opacity-100'
+              }`}
+              style={{ transitionDuration: sessionsPulse ? '0.2s' : '0.4s' }}
             >
               <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
@@ -508,7 +614,7 @@ function Header({ sessionId, dbReady, onNewSession, sessions, activeSession, onS
             {open && (
               <>
                 <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-                <div className="absolute right-0 top-full mt-1 w-64 glass rounded-xl py-1 z-20 shadow-2xl">
+                <div className="absolute right-0 top-full mt-1 w-64 glass rounded-xl py-1 z-20 shadow-2xl bubble-separate">
                   {sessionList.map((s) => (
                     <button
                       key={s.id}
@@ -541,13 +647,17 @@ function Header({ sessionId, dbReady, onNewSession, sessions, activeSession, onS
           </div>
         )}
         <button
-          onClick={onNewSession}
-          className="glass-hover glass rounded-lg px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200 transition-all flex items-center gap-1.5"
+          ref={newSessionBtnRef}
+          onClick={handleNewSession}
+          className={`glass-hover glass rounded-full px-4 py-2 text-xs text-gray-300 hover:text-white transition-all flex items-center gap-1.5 relative ${
+            animating ? 'scale-90 opacity-80' : 'scale-100'
+          }`}
+          style={{ transitionDuration: '0.3s' }}
         >
           <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
           </svg>
-          New Session
+          <span className="font-medium">New Session</span>
         </button>
       </div>
     </header>
@@ -770,7 +880,7 @@ function LoadingBubble() {
   );
 }
 
-function InputBar({ input, setInput, onSend, onKeyDown, status, dbReady }) {
+function InputBar({ input, setInput, onSend, onKeyDown, status, dbReady, inputRef }) {
   const busy = status !== "idle";
   const placeholder = dbReady
     ? "Ask a question about the papers..."
@@ -781,6 +891,7 @@ function InputBar({ input, setInput, onSend, onKeyDown, status, dbReady }) {
       <div className="max-w-3xl mx-auto flex gap-2">
         <div className="flex-1 relative gradient-border rounded-xl">
           <textarea
+            ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
