@@ -27,8 +27,16 @@ def run_scraping_job(self, query: str, session_id: str = "default"):
 @celery_app.task(bind=True, name="backend.tasks.run_rag_query")
 def run_rag_query(self, query: str, session_id: str = "default"):
     self.update_state(state="PROGRESS", meta={"step": "searching_qdrant", "detail": "Searching knowledge base..."})
-    chunks = search_qdrant(query, session_id=session_id)
+    try:
+        chunks = search_qdrant(query, session_id=session_id)
+    except Exception as e:
+        error_msg = f"Failed to search Qdrant: {e}"
+        r = _get_redis()
+        r.publish(f"stream:{session_id}", json.dumps({"done": True, "answer": None, "sources": [], "error": error_msg}))
+        return {"status": "error", "query": query, "answer": None, "sources": [], "error": error_msg}
     if not chunks:
+        r = _get_redis()
+        r.publish(f"stream:{session_id}", json.dumps({"done": True, "answer": None, "sources": [], "error": "No relevant chunks found"}))
         return {"status": "no_results", "query": query, "answer": None, "sources": []}
 
     sources = [{"title": c["title"], "score": c["score"]} for c in chunks]
