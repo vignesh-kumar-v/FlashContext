@@ -87,3 +87,89 @@ body {
   0%, 100% { opacity: 0.3; }
   50% { opacity: 1; }
 }
+
+.bubble-separate {
+  animation: bubble-separate 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transform-origin: top right;
+}
+@keyframes bubble-separate {
+  0% {
+    opacity: 0;
+    transform: scale(0.3) translateY(-10px);
+    filter: blur(4px);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.05) translateY(0);
+    filter: blur(0);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+    filter: blur(0);
+  }
+}
+
+.bubble-droplet {
+  position: fixed;
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%, rgba(224, 231, 255, 1), rgba(139, 92, 246, 0.9));
+  border: 3px solid rgba(165, 180, 252, 0.9);
+  pointer-events: none;
+  z-index: 50;
+  box-shadow:
+    0 0 50px rgba(99, 102, 241, 0.7),
+    0 0 100px rgba(139, 92, 246, 0.5),
+    0 0 150px rgba(168, 85, 247, 0.3),
+    inset 0 0 30px rgba(255, 255, 255, 0.4);
+}
+.bubble-droplet::after {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%, rgba(199, 210, 254, 0.5), transparent 70%);
+  animation: droplet-glow 0.7s ease-out forwards;
+}
+@keyframes droplet-glow {
+  0% { opacity: 1; transform: scale(1); }
+  100% { opacity: 0; transform: scale(2.5); }
+}
+@keyframes droplet-separate {
+  0% {
+    opacity: 1;
+    transform: scale(0.12) translate(0, 0);
+  }
+  15% {
+    opacity: 1;
+    transform: scale(0.35) translate(calc(var(--to-x) * 0.08), calc(var(--to-y) * 0.08));
+  }
+  40% {
+    opacity: 0.85;
+    transform: scale(0.65) translate(calc(var(--to-x) * 0.35), calc(var(--to-y) * 0.35));
+  }
+  70% {
+    opacity: 0.45;
+    transform: scale(0.9) translate(calc(var(--to-x) * 0.7), calc(var(--to-y) * 0.7));
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1) translate(var(--to-x), var(--to-y));
+  }
+}
+
+.sessions-btn-enter {
+  animation: sessions-enter 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+@keyframes sessions-enter {
+  0% {
+    opacity: 0;
+    transform: scale(0.1);
+    filter: blur(10px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+    filter: blur(0);
+  }
+}
