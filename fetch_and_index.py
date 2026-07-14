@@ -30,6 +30,9 @@ from huggingface_hub import InferenceClient
 load_dotenv()
 
 import fitz  # pymupdf
+import fitz.utils
+
+fitz.TOOLS.mupdf_warnings(False)
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from langchain_text_splitters import RecursiveCharacterTextSplitter
