@@ -1,9 +1,17 @@
+# Internal docs (not for public repo)
+BUG_REPORT.md
+
+# Node
+node_modules/
+
+# Build
+dist/
+build/
+
 # Python
 __pycache__/
 *.py[cod]
 *.egg-info/
-dist/
-build/
 .venv/
 venv/
 
@@ -13,6 +21,9 @@ downloaded_pdfs/
 processed_texts/
 qdrant_storage/
 document_index/
+
+# Logs
+*.log
 
 # Secrets
 .env
