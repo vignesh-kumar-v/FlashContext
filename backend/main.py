@@ -2,9 +2,10 @@ import asyncio
 import json
 import redis.asyncio as redis_lib
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from celery.result import AsyncResult
 
+from backend.celery_app import celery_app
 from backend.tasks import run_scraping_job, run_rag_query
 from backend.config import REDIS_BROKER_URL
 
@@ -12,7 +13,7 @@ app = FastAPI(title="FlashContext", version="1.0.0")
 
 
 class QueryRequest(BaseModel):
-    query: str
+    query: str = Field(..., min_length=1)
     session_id: str = "default"
 
 
@@ -43,7 +44,7 @@ def start_scrape(req: QueryRequest):
 
 @app.get("/scrape/{task_id}", response_model=TaskStatusResponse)
 def get_scrape_status(task_id: str):
-    result = AsyncResult(task_id, app=run_scraping_job)
+    result = AsyncResult(task_id, app=celery_app)
     response = TaskStatusResponse(task_id=task_id, status=result.state)
     if result.state == "PROGRESS":
         response.progress = result.info
@@ -62,7 +63,7 @@ def start_query(req: QueryRequest):
 
 @app.get("/query/{task_id}", response_model=TaskStatusResponse)
 def get_query_status(task_id: str):
-    result = AsyncResult(task_id, app=run_rag_query)
+    result = AsyncResult(task_id, app=celery_app)
     response = TaskStatusResponse(task_id=task_id, status=result.state)
     if result.state == "PROGRESS":
         response.progress = result.info
@@ -75,14 +76,16 @@ def get_query_status(task_id: str):
 
 # ── WebSocket ────────────────────────────────────────────────────────
 
-async def _poll_task(task_id: str, task_func, websocket: WebSocket):
+async def _poll_task(task_id: str, websocket: WebSocket):
     last_state = None
+    last_info = None
     while True:
-        result = await asyncio.to_thread(AsyncResult, task_id, app=task_func)
+        result = await asyncio.to_thread(AsyncResult, task_id, app=celery_app)
         state = result.state
 
-        if state != last_state or state == "PROGRESS":
+        if state != last_state or (state == "PROGRESS" and result.info != last_info):
             last_state = state
+            last_info = result.info
             msg = {"task_id": task_id, "status": state}
             if state == "PROGRESS" and result.info:
                 msg["progress"] = result.info
@@ -104,6 +107,21 @@ async def _stream_query(task_id: str, session_id: str, websocket: WebSocket):
     pubsub = r.pubsub()
     await pubsub.subscribe(f"stream:{session_id}")
 
+    done = False
+
+    async def poll_celery():
+        while not done:
+            result = await asyncio.to_thread(AsyncResult, task_id, app=celery_app)
+            if result.state == "FAILURE":
+                await websocket.send_json({
+                    "status": "FAILURE",
+                    "result": {"error": str(result.info)},
+                })
+                return
+            await asyncio.sleep(1)
+
+    poll_task = asyncio.create_task(poll_celery())
+
     try:
         async for message in pubsub.listen():
             if message["type"] != "message":
@@ -116,16 +134,29 @@ async def _stream_query(task_id: str, session_id: str, websocket: WebSocket):
             elif "progress" in data:
                 await websocket.send_json({"status": "PROGRESS", "progress": data["progress"]})
             elif data.get("done"):
-                await websocket.send_json({
-                    "status": "SUCCESS",
-                    "result": {
-                        "status": "completed",
-                        "answer": data["answer"],
-                        "sources": data["sources"],
-                    },
-                })
+                done = True
+                if data.get("error"):
+                    await websocket.send_json({
+                        "status": "FAILURE",
+                        "result": {"error": data["error"]},
+                    })
+                else:
+                    await websocket.send_json({
+                        "status": "SUCCESS",
+                        "result": {
+                            "status": "completed",
+                            "answer": data.get("answer"),
+                            "sources": data.get("sources", []),
+                        },
+                    })
                 break
     finally:
+        done = True
+        poll_task.cancel()
+        try:
+            await poll_task
+        except asyncio.CancelledError:
+            pass
         await pubsub.unsubscribe()
         await pubsub.close()
 
@@ -150,7 +181,7 @@ async def websocket_endpoint(websocket: WebSocket):
     if msg_type == "scrape":
         task = run_scraping_job.delay(query, session_id=session_id)
         await websocket.send_json({"task_id": task.id, "status": "PENDING"})
-        await _poll_task(task.id, run_scraping_job, websocket)
+        await _poll_task(task.id, websocket)
 
     elif msg_type == "query":
         task = run_rag_query.delay(query, session_id=session_id)
