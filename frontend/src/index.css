@@ -24,11 +24,11 @@ body {
 
 .glass-hover:hover {
   background: rgba(30, 41, 59, 0.8);
-  border-color: rgba(99, 102, 241, 0.3);
+  border-color: rgba(244, 63, 94, 0.3);
 }
 
 .gradient-text {
-  background: linear-gradient(135deg, #818cf8, #c084fc, #f472b6);
+  background: linear-gradient(135deg, #fb7185, #e11d48, #f43f5e);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -43,7 +43,7 @@ body {
   inset: 0;
   border-radius: inherit;
   padding: 1px;
-  background: linear-gradient(135deg, #818cf8, #c084fc, #f472b6);
+  background: linear-gradient(135deg, #fb7185, #e11d48, #f43f5e);
   -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
   mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
   -webkit-mask-composite: xor;
@@ -113,14 +113,14 @@ body {
 .bubble-droplet {
   position: fixed;
   border-radius: 50%;
-  background: radial-gradient(circle at 30% 30%, rgba(224, 231, 255, 1), rgba(139, 92, 246, 0.9));
-  border: 3px solid rgba(165, 180, 252, 0.9);
+  background: radial-gradient(circle at 30% 30%, rgba(255, 228, 230, 1), rgba(244, 63, 94, 0.9));
+  border: 3px solid rgba(251, 113, 133, 0.9);
   pointer-events: none;
   z-index: 50;
   box-shadow:
-    0 0 50px rgba(99, 102, 241, 0.7),
-    0 0 100px rgba(139, 92, 246, 0.5),
-    0 0 150px rgba(168, 85, 247, 0.3),
+    0 0 50px rgba(244, 63, 94, 0.7),
+    0 0 100px rgba(244, 63, 94, 0.5),
+    0 0 150px rgba(225, 29, 72, 0.3),
     inset 0 0 30px rgba(255, 255, 255, 0.4);
 }
 .bubble-droplet::after {
@@ -128,7 +128,7 @@ body {
   position: absolute;
   inset: -6px;
   border-radius: 50%;
-  background: radial-gradient(circle at 30% 30%, rgba(199, 210, 254, 0.5), transparent 70%);
+  background: radial-gradient(circle at 30% 30%, rgba(254, 205, 211, 0.5), transparent 70%);
   animation: droplet-glow 0.7s ease-out forwards;
 }
 @keyframes droplet-glow {

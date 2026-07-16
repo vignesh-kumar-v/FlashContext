@@ -10,8 +10,8 @@ function generateId() {
 
 const STEP_LABELS = {
   extracting_keywords: "Extracting keywords",
-  fetching_papers: "Searching Semantic Scholar",
-  downloading_pdfs: "Downloading PDFs",
+  fetching_papers: "Searching ArXiv",
+  downloading_pdfs: "Downloading relevant papers",
   initializing_qdrant: "Initializing vector DB",
   chunking_storing: "Chunking & embedding",
   done: "Done",
@@ -173,7 +173,7 @@ function renderInlineMarkdown(text) {
       parts.push(<em key={key++} className="italic text-gray-300">{renderLatex(italicMatch[1])}</em>);
     } else if (firstMatch === codeMatch) {
       parts.push(
-        <code key={key++} className="font-mono text-xs bg-gray-800/70 text-indigo-300 px-1.5 py-0.5 rounded">
+        <code key={key++} className="font-mono text-xs bg-gray-800/70 text-rose-300 px-1.5 py-0.5 rounded">
           {codeMatch[1]}
         </code>
       );
@@ -186,7 +186,9 @@ function renderInlineMarkdown(text) {
 }
 
 function renderLatex(text) {
-  if (!text || !text.includes("$")) return text;
+  if (!text) return text;
+  const hasLatex = text.includes("$") || text.includes("\\(") || text.includes("\\[");
+  if (!hasLatex) return text;
   const parts = [];
   let remaining = text;
   let key = 0;
@@ -195,28 +197,33 @@ function renderLatex(text) {
 
   while (remaining.length > 0 && iterations < MAX_ITERATIONS) {
     iterations++;
-    const displayMatch = remaining.match(/\$\$([\s\S]*?)\$\$/);
-    const inlineMatch = remaining.match(/(?<!\$)\$(?!\$)([\s\S]*?)\$(?!\$)/);
+    const displayDollar = remaining.match(/\$\$([\s\S]*?)\$\$/);
+    const inlineDollar = remaining.match(/(?<!\$)\$(?!\$)([\s\S]*?)\$(?!\$)/);
+    const displayBracket = remaining.match(/\\\[([\s\S]*?)\\\]/);
+    const inlineBracket = remaining.match(/\\\(([\s\S]*?)\\\)/);
 
-    let match, isDisplay;
-    if (displayMatch && (!inlineMatch || displayMatch.index <= inlineMatch.index)) {
-      match = displayMatch;
-      isDisplay = true;
-    } else if (inlineMatch) {
-      match = inlineMatch;
-      isDisplay = false;
-    } else {
+    const matches = [
+      { match: displayDollar, isDisplay: true },
+      { match: inlineDollar, isDisplay: false },
+      { match: displayBracket, isDisplay: true },
+      { match: inlineBracket, isDisplay: false },
+    ].filter(m => m.match);
+
+    if (matches.length === 0) {
       parts.push(<span key={key++}>{remaining}</span>);
       break;
     }
 
-    if (match.index > 0) {
-      parts.push(<span key={key++}>{remaining.slice(0, match.index)}</span>);
+    const first = matches.reduce((earliest, m) =>
+      !earliest || m.match.index < earliest.match.index ? m : earliest);
+
+    if (first.match.index > 0) {
+      parts.push(<span key={key++}>{remaining.slice(0, first.match.index)}</span>);
     }
 
     try {
-      const html = katex.renderToString(match[1], {
-        displayMode: isDisplay,
+      const html = katex.renderToString(first.match[1], {
+        displayMode: first.isDisplay,
         throwOnError: false,
       });
       parts.push(
@@ -568,10 +575,10 @@ function Header({ sessionId, dbReady, onNewSession, sessions, activeSession, onS
         ? 'all 0.2s ease-out' 
         : 'transform 0.45s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.2s ease-in, width 0.2s, height 0.2s',
       borderRadius: '9999px',
-      background: 'radial-gradient(circle at 30% 30%, rgba(224, 231, 255, 0.9), rgba(139, 92, 246, 0.8))',
+      background: 'radial-gradient(circle at 30% 30%, rgba(255, 228, 230, 0.9), rgba(244, 63, 94, 0.8))',
       backdropFilter: 'blur(10px)',
-      border: '1px solid rgba(165, 180, 252, 0.8)',
-      boxShadow: '0 0 20px rgba(139, 92, 246, 0.6)',
+      border: '1px solid rgba(251, 113, 133, 0.8)',
+      boxShadow: '0 0 20px rgba(244, 63, 94, 0.6)',
       zIndex: 50,
       pointerEvents: 'none'
     };
@@ -582,7 +589,7 @@ function Header({ sessionId, dbReady, onNewSession, sessions, activeSession, onS
       {dropletInfo && <div style={dropletStyle} />}
       
       <div className="flex items-center gap-3">
-        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
+        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-rose-500 to-rose-600 flex items-center justify-center">
           <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
           </svg>
@@ -600,7 +607,7 @@ function Header({ sessionId, dbReady, onNewSession, sessions, activeSession, onS
               ref={sessionsBtnRef}
               onClick={() => setOpen(!open)}
               className={`glass-hover glass rounded-full px-4 py-2 text-xs text-gray-300 hover:text-white transition-all flex items-center gap-1.5 ${
-                sessionsPulse ? 'scale-110 bg-indigo-500/30 text-white shadow-[0_0_20px_rgba(139,92,246,0.6)]' : 'scale-100'
+                sessionsPulse ? 'scale-110 bg-rose-500/30 text-white shadow-[0_0_20px_rgba(244,63,94,0.6)]' : 'scale-100'
               } ${
                 animating && dropletInfo?.phase === 'start' && sessionList.length === 2 ? 'opacity-0' : 'opacity-100'
               }`}
@@ -621,7 +628,7 @@ function Header({ sessionId, dbReady, onNewSession, sessions, activeSession, onS
                       onClick={() => { onSwitchSession(s.id); setOpen(false); }}
                       className={`w-full text-left px-4 py-2 text-xs flex items-center justify-between transition-colors ${
                         s.id === activeSession
-                          ? "bg-indigo-500/20 text-indigo-300"
+                          ? "bg-rose-500/20 text-rose-300"
                           : "text-gray-400 hover:bg-gray-800/50 hover:text-gray-200"
                       }`}
                     >
@@ -638,14 +645,8 @@ function Header({ sessionId, dbReady, onNewSession, sessions, activeSession, onS
           </div>
         )}
         <div className="flex items-center gap-2 text-gray-400">
-          <code className="font-mono text-[10px] bg-gray-800/50 px-2 py-0.5 rounded text-indigo-400">{sessionId}</code>
+          <code className="font-mono text-[10px] bg-gray-800/50 px-2 py-0.5 rounded text-rose-400">{sessionId}</code>
         </div>
-        {dbReady && (
-          <div className="flex items-center gap-1.5 text-emerald-400">
-            <div className="w-2 h-2 rounded-full bg-emerald-400 pulse-dot" />
-            <span className="text-xs font-medium">DB Ready</span>
-          </div>
-        )}
         <button
           ref={newSessionBtnRef}
           onClick={handleNewSession}
@@ -688,9 +689,9 @@ function ChatArea({ messages, status, progress, chatRef, showWelcome, streamingT
 function WelcomeMessage() {
   return (
     <div className="flex flex-col items-center justify-center h-full text-center fade-in">
-      <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-indigo-500/20 to-purple-600/20 border border-indigo-500/20 flex items-center justify-center mb-6">
-        <svg className="w-10 h-10 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
+      <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-rose-500/20 to-rose-600/20 border border-rose-500/20 flex items-center justify-center mb-6">
+        <svg className="w-10 h-10 text-rose-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 2L3.5 13.5h7L10.5 22l10-11.5h-7z" />
         </svg>
       </div>
       <h2 className="text-2xl font-semibold text-gray-100 mb-3">
@@ -732,7 +733,7 @@ function Message({ msg }) {
   return (
     <div className={`flex gap-3 slide-up ${isUser ? "justify-end" : "justify-start"}`}>
       {!isUser && (
-        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shrink-0 mt-0.5">
+        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-rose-500 to-rose-600 flex items-center justify-center shrink-0 mt-0.5">
           <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
           </svg>
@@ -742,7 +743,7 @@ function Message({ msg }) {
         <div
           className={`rounded-2xl px-4 py-3 text-sm leading-relaxed ${
             isUser
-              ? "bg-indigo-600/30 border border-indigo-500/20 text-gray-100"
+              ? "bg-rose-600/30 border border-rose-500/20 text-gray-100"
               : "glass text-gray-200"
           }`}
         >
@@ -754,7 +755,7 @@ function Message({ msg }) {
             {msg.sources.map((s, i) => (
               <div key={i} className="glass rounded-lg px-3 py-1.5 text-xs flex items-center justify-between">
                 <span className="text-gray-300 truncate mr-2">{s.title}</span>
-                <span className="text-indigo-400 font-mono shrink-0">{s.score.toFixed(3)}</span>
+                <span className="text-rose-400 font-mono shrink-0">{s.score.toFixed(3)}</span>
               </div>
             ))}
           </div>
@@ -767,7 +768,7 @@ function Message({ msg }) {
 function StreamingMessage({ text, sources }) {
   return (
     <div className="flex gap-3 slide-up">
-      <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shrink-0 mt-0.5">
+      <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-rose-500 to-rose-600 flex items-center justify-center shrink-0 mt-0.5">
         <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
         </svg>
@@ -776,12 +777,12 @@ function StreamingMessage({ text, sources }) {
         <div className="glass rounded-2xl px-4 py-3 text-sm leading-relaxed text-gray-200 relative overflow-hidden">
           <div className="whitespace-pre-wrap">
             {text}
-            <span className="inline-block w-2 h-4 bg-indigo-400 ml-0.5 align-middle animate-pulse rounded-sm" />
+            <span className="inline-block w-2 h-4 bg-rose-400 ml-0.5 align-middle animate-pulse rounded-sm" />
           </div>
           <div
             className="absolute bottom-0 left-0 right-0 h-px"
             style={{
-              background: "linear-gradient(90deg, transparent, #818cf8, #c084fc, transparent)",
+              background: "linear-gradient(90deg, transparent, #fb7185, #e11d48, transparent)",
               animation: "shimmer 2s ease-in-out infinite",
             }}
           />
@@ -792,7 +793,7 @@ function StreamingMessage({ text, sources }) {
             {sources.map((s, i) => (
               <div key={i} className="glass rounded-lg px-3 py-1.5 text-xs flex items-center justify-between">
                 <span className="text-gray-300 truncate mr-2">{s.title}</span>
-                <span className="text-indigo-400 font-mono shrink-0">{s.score.toFixed(3)}</span>
+                <span className="text-rose-400 font-mono shrink-0">{s.score.toFixed(3)}</span>
               </div>
             ))}
           </div>
@@ -813,7 +814,7 @@ function ProgressCard({ status, progress }) {
 
   return (
     <div className="flex gap-3 slide-up">
-      <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shrink-0 mt-0.5">
+      <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-rose-500 to-rose-600 flex items-center justify-center shrink-0 mt-0.5">
         <svg className="w-4 h-4 text-white animate-spin" fill="none" viewBox="0 0 24 24">
           <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
           <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
@@ -827,7 +828,7 @@ function ProgressCard({ status, progress }) {
             className="h-full rounded-full transition-all duration-700 ease-out"
             style={{
               width: `${progressPct}%`,
-              background: "linear-gradient(90deg, #818cf8, #c084fc, #f472b6)",
+              background: "linear-gradient(90deg, #fb7185, #e11d48, #f472b6)",
             }}
           />
         </div>
@@ -842,9 +843,9 @@ function ProgressCard({ status, progress }) {
                 className="flex-1 h-1 rounded-full transition-all duration-500"
                 style={{
                   background: done
-                    ? "linear-gradient(90deg, #818cf8, #c084fc)"
+                    ? "linear-gradient(90deg, #fb7185, #e11d48)"
                     : active
-                    ? "#6366f1"
+                    ? "#f43f5e"
                     : "#374151",
                 }}
               />
@@ -857,7 +858,7 @@ function ProgressCard({ status, progress }) {
           <span className="text-sm text-gray-300">{STEP_LABELS[step] || step}</span>
         </div>
         {detail && (
-          <p className="text-xs text-indigo-400 mt-1.5 ml-7 typing-cursor">{detail}</p>
+          <p className="text-xs text-rose-400 mt-1.5 ml-7 typing-cursor">{detail.replace(/\s*\(\d+\/\d+\)\.\.\.$/, "")}</p>
         )}
       </div>
     </div>
@@ -867,7 +868,7 @@ function ProgressCard({ status, progress }) {
 function LoadingBubble() {
   return (
     <div className="flex gap-3 slide-up">
-      <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shrink-0 mt-0.5">
+      <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-rose-500 to-rose-600 flex items-center justify-center shrink-0 mt-0.5">
         <svg className="w-4 h-4 text-white animate-spin" fill="none" viewBox="0 0 24 24">
           <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
           <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
@@ -904,7 +905,7 @@ function InputBar({ input, setInput, onSend, onKeyDown, status, dbReady, inputRe
         <button
           onClick={onSend}
           disabled={busy || !input.trim()}
-          className="shrink-0 w-11 h-11 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed hover:from-indigo-400 hover:to-purple-500 transition-all"
+          className="shrink-0 w-11 h-11 rounded-xl bg-gradient-to-br from-rose-500 to-rose-600 flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed hover:from-rose-400 hover:to-rose-500 transition-all"
         >
           {busy ? (
             <svg className="w-5 h-5 text-white animate-spin" fill="none" viewBox="0 0 24 24">
