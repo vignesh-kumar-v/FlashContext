@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Semantic Scholar Paper Fetcher with Layout-Aware Chunking and Qdrant Storage
+ArXiv Paper Fetcher with Layout-Aware Chunking and Qdrant Storage
 
 Workflow:
 1. Extract keywords from query using glm-5.2:cloud via Ollama
-2. Search Semantic Scholar API with keywords
-3. Fetch papers: 80% top-cited, 20% most recent (ArXiv-only)
-4. Download PDFs from ArXiv
-5. Chunk PDFs using layout-aware chunking (headings-based)
+2. Search ArXiv API with keywords (relevance + recent)
+3. Download PDFs from ArXiv
+4. Chunk PDFs using layout-aware chunking (headings-based)
    Fallback: recursive character chunking
-6. Store chunks in Qdrant vector DB with metadata
+5. Store chunks in Qdrant vector DB with metadata
 """
 
 import os
@@ -21,6 +20,7 @@ import uuid
 import hashlib
 import logging
 import requests
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Optional
 from collections import Counter
@@ -46,13 +46,14 @@ QDRANT_URL = os.getenv("QDRANT_URL", "")
 QDRANT_PATH = Path(__file__).parent / "qdrant_storage"
 COLLECTION_PREFIX = "papers"
 TOTAL_PAPERS = 25
-TOP_CITED_RATIO = 0.8
+TOP_RELEVANT_RATIO = 0.8
 RECENT_RATIO = 0.2
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 HEADING_FONT_THRESHOLD = 1.15
 MIN_SECTIONS_FOR_LAYOUT = 3
 MIN_CHARS_FOR_LAYOUT_CHECK = 5000
+ARXIV_RATE_LIMIT_INTERVAL = 3
 # --- End Configuration ---
 
 logging.basicConfig(
@@ -69,8 +70,14 @@ log = logging.getLogger(__name__)
 
 def extract_keywords(query: str) -> str:
     prompt = (
-        "Extract the key technical terms and concepts from the following research query. "
-        "Return ONLY a space-separated list of keywords, no explanation, no punctuation.\n\n"
+        "Extract the 5-10 most important technical search terms from the following research query. "
+        "These terms will be used to search for academic papers on ArXiv.\n"
+        "Rules:\n"
+        "- Return ONLY a space-separated list of keywords\n"
+        "- No explanation, no punctuation, no bullet points\n"
+        "- Prefer single words or short phrases (1-2 words each)\n"
+        "- Focus on the core topic, not peripheral details\n"
+        "- Do not repeat keywords\n\n"
         f"Query: {query}\n\nKeywords:"
     )
     last_error = None
@@ -95,77 +102,109 @@ def extract_keywords(query: str) -> str:
 
 
 # =============================================================================
-# Step 2: Semantic Scholar API
+# Step 2: ArXiv API
 # =============================================================================
 
-S2_BASE = "https://api.semanticscholar.org/graph/v1"
-S2_FIELDS = "title,abstract,year,citationCount,externalIds,openAccessPdf,publicationDate,authors"
+ARXIV_BASE = "https://export.arxiv.org/api/query"
+ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 
 
-def _s2_search(keywords: str, sort: str, limit: int, progress_callback=None) -> list[dict]:
+def _arxiv_search(keywords: str, sort_by: str, sort_order: str, limit: int, progress_callback=None) -> list[dict]:
     papers = []
-    offset = 0
+    start = 0
     batch_size = min(limit, 100)
-    attempt = 0
 
     while len(papers) < limit:
-        attempt += 1
         if progress_callback:
-            progress_callback("fetching_papers", f"Searching Semantic Scholar (attempt {attempt}, found {len(papers)} papers)...")
+            progress_callback("fetching_papers", f"Searching ArXiv (fetched {len(papers)}/{limit} papers)...")
         params = {
-            "query": keywords,
-            "limit": batch_size,
-            "offset": offset,
-            "sort": sort,
-            "fields": S2_FIELDS,
+            "search_query": f"all:{keywords}",
+            "start": start,
+            "max_results": batch_size,
+            "sortBy": sort_by,
+            "sortOrder": sort_order,
         }
-        resp = requests.get(f"{S2_BASE}/paper/search", params=params, timeout=30)
-        if resp.status_code == 429:
-            log.warning("Rate limited (429), waiting 5s...")
-            if progress_callback:
-                progress_callback("fetching_papers", "Rate limited by Semantic Scholar, waiting...")
-            time.sleep(5)
-            continue
+        resp = requests.get(ARXIV_BASE, params=params, timeout=30)
         resp.raise_for_status()
-        data = resp.json()
-        batch = data.get("data", [])
-        if not batch:
+
+        root = ET.fromstring(resp.text)
+        entries = root.findall("atom:entry", ATOM_NS)
+        if not entries:
             break
-        papers.extend(batch)
-        offset += len(batch)
-        if len(batch) < batch_size:
+
+        for entry in entries:
+            arxiv_url = entry.find("atom:id", ATOM_NS).text.strip()
+            arxiv_id = arxiv_url.split("/abs/")[-1]
+
+            title_el = entry.find("atom:title", ATOM_NS)
+            title = " ".join(title_el.text.split()) if title_el is not None else "Untitled"
+
+            summary_el = entry.find("atom:summary", ATOM_NS)
+            abstract = " ".join(summary_el.text.split()) if summary_el is not None else ""
+
+            published_el = entry.find("atom:published", ATOM_NS)
+            year = ""
+            if published_el is not None:
+                year = published_el.text[:4]
+
+            authors = []
+            for author in entry.findall("atom:author", ATOM_NS):
+                name_el = author.find("atom:name", ATOM_NS)
+                if name_el is not None:
+                    authors.append({"name": name_el.text.strip()})
+
+            pdf_link = ""
+            for link in entry.findall("atom:link", ATOM_NS):
+                if link.get("title") == "pdf":
+                    pdf_link = link.get("href")
+                    break
+
+            papers.append({
+                "paperId": arxiv_id,
+                "title": title,
+                "abstract": abstract,
+                "year": year,
+                "externalIds": {"ArXiv": arxiv_id},
+                "openAccessPdf": {"url": pdf_link} if pdf_link else None,
+                "publicationDate": published_el.text if published_el is not None else "",
+                "authors": authors,
+                "citationCount": 0,
+            })
+
+        start += len(entries)
+        if len(entries) < batch_size:
             break
-        time.sleep(1.1)
+        time.sleep(ARXIV_RATE_LIMIT_INTERVAL)
 
     return papers[:limit]
 
 
 def fetch_papers(keywords: str, progress_callback=None) -> list[dict]:
-    top_n = math.ceil(TOTAL_PAPERS * TOP_CITED_RATIO)
+    top_n = math.ceil(TOTAL_PAPERS * TOP_RELEVANT_RATIO)
     recent_n = math.ceil(TOTAL_PAPERS * RECENT_RATIO)
 
     if progress_callback:
-        progress_callback("fetching_papers", "Searching for top-cited papers...")
-    cited = _s2_search(keywords, sort="citationCount:desc", limit=top_n * 3, progress_callback=progress_callback)
+        progress_callback("fetching_papers", "Searching for most relevant papers...")
+    relevant = _arxiv_search(keywords, sort_by="relevance", sort_order="descending", limit=top_n * 3, progress_callback=progress_callback)
 
     if progress_callback:
         progress_callback("fetching_papers", "Searching for recent papers...")
-    recent = _s2_search(keywords, sort="publicationDate:desc", limit=recent_n * 3, progress_callback=progress_callback)
+    time.sleep(ARXIV_RATE_LIMIT_INTERVAL)
+    recent = _arxiv_search(keywords, sort_by="submittedDate", sort_order="descending", limit=recent_n * 3, progress_callback=progress_callback)
 
     seen = set()
     merged = []
-    for p in cited + recent:
+    for p in relevant + recent:
         pid = p.get("paperId")
-        arxiv_id = p.get("externalIds", {}).get("ArXiv")
-        if pid and pid not in seen and arxiv_id:
+        if pid and pid not in seen:
             seen.add(pid)
             merged.append(p)
 
-    cited_arxiv = [p for p in merged if p in cited][:top_n]
+    relevant_arxiv = [p for p in merged if p in relevant][:top_n]
     recent_arxiv = [p for p in merged if p in recent][:recent_n]
-    final = cited_arxiv + recent_arxiv
+    final = relevant_arxiv + recent_arxiv
 
-    log.info(f"ArXiv papers: {len(final)} (top-cited: {len(cited_arxiv)}, recent: {len(recent_arxiv)})")
+    log.info(f"ArXiv papers: {len(final)} (relevant: {len(relevant_arxiv)}, recent: {len(recent_arxiv)})")
     return final
 
 
@@ -190,7 +229,14 @@ def download_pdf(paper: dict) -> Optional[Path]:
         log.warning(f"  No ArXiv ID for: {title[:80]}")
         return None
 
-    url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+    pdf_url = paper.get("openAccessPdf", {})
+    if pdf_url and isinstance(pdf_url, dict):
+        url = pdf_url.get("url", "")
+    else:
+        url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+    if not url:
+        url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+
     log.info(f"  Downloading ArXiv PDF: {url}")
     try:
         r = requests.get(url, timeout=60, stream=True)
@@ -418,6 +464,27 @@ def get_embedding(text: str, max_retries: int = 5) -> list[float]:
     raise last_error
 
 
+def get_embeddings_batch(texts: list[str], max_retries: int = 5) -> list[list[float]]:
+    texts = [t[:8000] for t in texts]
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            client = _get_hf_client()
+            result = client.feature_extraction(texts, model=EMBED_MODEL)
+            if hasattr(result, "tolist"):
+                result = result.tolist()
+            if isinstance(result, list) and len(result) == len(texts) and isinstance(result[0], list):
+                return result
+            raise ValueError(f"Unexpected batch embedding format: {type(result)}")
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                wait = 2 ** attempt
+                log.warning(f"  Batch embedding attempt {attempt + 1} failed: {e}. Retrying in {wait}s...")
+                time.sleep(wait)
+    raise last_error
+
+
 # =============================================================================
 # Step 6: Qdrant Storage
 # =============================================================================
@@ -468,13 +535,23 @@ def store_chunks(
         [a.get("name", "") for a in (paper.get("authors") or [])[:3]]
     )
 
+    texts = [c["text"] for c in chunks]
+    try:
+        embeddings = get_embeddings_batch(texts)
+    except Exception as e:
+        log.warning(f"  Batch embedding failed ({e}), falling back to per-chunk...")
+        embeddings = []
+        for i, chunk in enumerate(chunks):
+            try:
+                embeddings.append(get_embedding(chunk["text"]))
+            except Exception as e2:
+                log.warning(f"  Skipping chunk {i}: embedding failed: {e2}")
+                embeddings.append(None)
+
     points = []
     skipped = 0
     for i, chunk in enumerate(chunks):
-        try:
-            emb = get_embedding(chunk["text"])
-        except Exception as e:
-            log.warning(f"  Skipping chunk {i}: embedding failed: {e}")
+        if i >= len(embeddings) or embeddings[i] is None:
             skipped += 1
             continue
         point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{paper_id}_{i}"))
@@ -489,7 +566,7 @@ def store_chunks(
             **chunk["metadata"],
         }
 
-        points.append(PointStruct(id=point_id, vector=emb, payload=payload))
+        points.append(PointStruct(id=point_id, vector=embeddings[i], payload=payload))
 
     if points:
         client.upsert(collection_name=collection_name, points=points)
@@ -516,7 +593,7 @@ def run_pipeline(query: str, session_id: str = "default", progress_callback=None
     keywords = extract_keywords(query)
     _progress("extracting_keywords", f"Keywords: {keywords}")
 
-    _progress("fetching_papers", "Searching Semantic Scholar for relevant papers...")
+    _progress("fetching_papers", "Searching ArXiv for relevant papers...")
     papers = fetch_papers(keywords, progress_callback=progress_callback)
     if not papers:
         _progress("error", "No papers found!")
@@ -557,6 +634,54 @@ def run_pipeline(query: str, session_id: str = "default", progress_callback=None
     log.info("Done! All papers processed and stored in Qdrant.")
     log.info(f"PDFs saved to: {PDF_DIR}")
     log.info(f"Qdrant storage: {QDRANT_PATH}")
+
+
+def add_papers_to_collection(query: str, session_id: str, count: int = 3, progress_callback=None):
+    """Fetch N new papers and add them to an existing Qdrant collection without clearing it."""
+    PDF_DIR.mkdir(parents=True, exist_ok=True)
+    QDRANT_PATH.mkdir(parents=True, exist_ok=True)
+
+    def _progress(step, detail=""):
+        log.info(f"Background refresh: {step} - {detail}")
+        if progress_callback:
+            progress_callback(step, detail)
+
+    _progress("extracting_keywords", "Extracting keywords for background refresh...")
+    keywords = extract_keywords(query)
+    _progress("extracting_keywords", f"Keywords: {keywords}")
+
+    _progress("fetching_papers", f"Searching ArXiv for {count} new papers...")
+    papers = fetch_papers(keywords, progress_callback=progress_callback)
+    if not papers:
+        _progress("error", "No papers found for background refresh!")
+        return
+
+    papers = papers[:count]
+
+    _progress("downloading_pdfs", f"Downloading PDFs (0/{len(papers)})...")
+    downloaded = []
+    for i, paper in enumerate(papers):
+        path = download_pdf(paper)
+        if path:
+            downloaded.append((paper, path))
+        _progress("downloading_pdfs", f"Downloading PDFs ({len(downloaded)}/{len(papers)})...")
+        time.sleep(0.5)
+
+    if not downloaded:
+        _progress("error", "No PDFs downloaded for background refresh!")
+        return
+
+    client, collection_name = init_qdrant(session_id)
+
+    _progress("chunking_storing", f"Chunking and embedding new papers (0/{len(downloaded)})...")
+    for i, (paper, pdf_path) in enumerate(downloaded):
+        log.info(f"  Background: {pdf_path.name}")
+        chunks = chunk_pdf(pdf_path)
+        store_chunks(client, collection_name, paper, pdf_path, chunks)
+        _progress("chunking_storing", f"Chunking and embedding new papers ({i+1}/{len(downloaded)})...")
+        time.sleep(0.3)
+
+    _progress("done", f"Background refresh complete! Added {len(downloaded)} new papers.")
 
 
 if __name__ == "__main__":
