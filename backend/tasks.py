@@ -7,8 +7,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import redis
 from backend.celery_app import celery_app
 from backend.config import REDIS_BROKER_URL
-from fetch_and_index import run_pipeline
-from query import search_qdrant, build_prompt, generate_response_stream
+from fetch_and_index import run_pipeline, add_papers_to_collection
+from query import search_qdrant, build_prompt, generate_response_stream, detect_topic_shift
 
 
 def _get_redis():
@@ -54,4 +54,16 @@ def run_rag_query(self, query: str, session_id: str = "default"):
 
     r.publish(channel, json.dumps({"done": True, "answer": full_response, "sources": sources}))
 
+    if detect_topic_shift(chunks):
+        background_refresh.delay(query, session_id=session_id)
+
     return {"status": "completed", "query": query, "answer": full_response, "sources": sources}
+
+
+@celery_app.task(bind=True, name="backend.tasks.background_refresh")
+def background_refresh(self, query: str, session_id: str = "default"):
+    def on_progress(step, detail):
+        self.update_state(state="PROGRESS", meta={"step": step, "detail": detail})
+
+    add_papers_to_collection(query, session_id=session_id, count=3, progress_callback=on_progress)
+    return {"status": "completed", "query": query, "session_id": session_id}
