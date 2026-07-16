@@ -89,6 +89,15 @@ def search_qdrant(query: str, session_id: str = "default", top_k: int = TOP_K) -
     return chunks
 
 
+def detect_topic_shift(chunks: list[dict]) -> bool:
+    """Return True if the top chunk scores are low, indicating a topic shift."""
+    if not chunks:
+        return True
+    top_scores = [c["score"] for c in chunks[:3]]
+    avg = sum(top_scores) / len(top_scores)
+    return avg < 0.25
+
+
 def build_prompt(query: str, chunks: list[dict]) -> str:
     context_parts = []
     for i, c in enumerate(chunks):
